@@ -12,7 +12,7 @@
 #endif
 
 // Pin connected to MOSFET that'll act as a switch for door strikes, power tools, etc.
-#define ACTUATOR_PIN 6 // Is this pin correct? j-c
+#define ACTUATOR_PIN 14 // mosfet pin
 
 // flashing GREEN LED means operating correctly!
 // flashing RED LED means "in programming mode"
