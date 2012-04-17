@@ -1,9 +1,22 @@
 // Buzz 28 Mar 2012
 // see https://github.com/davidbuzz/snarc for more info
 
+// un-comment if debugging
+// #define DEBUG
+
+#define ENABLE_ESTOP
+#ifdef ENABLE_ESTOP
+	#define ESTOP_PIN 3
+	#define ESTOP_INTERRUPT_PIN 1
+	bool lockdown = false;
+#endif
+
+// Pin connected to MOSFET that'll act as a switch for door strikes, power tools, etc.
+#define ACTUATOR_PIN 6 // Is this pin correct? j-c
 
 // flashing GREEN LED means operating correctly!
 // flashing RED LED means "in programming mode"
+// fast flashing RED LED means under E-STOP condition.
 
 //LED related variables:
 #define LED_PIN1 5  //GREEN HIGH
@@ -13,6 +26,16 @@ int ledState = RED;  // toggle to turn the LEDS on/off/etc
 long previousMillis = 0;
 long interval = 1000;           // interval at which to blink (milliseconds)
 
+#define CLIENT 1   // comment out this line to completely disable all ETHERNET and networking related code
+
+#define SERIAL_RECIEVE_BUFFER_LENGTH 32 // Length of serial read buffer
+
+#define DEVICE_NAME_MAX_LENGTH 12 // Maximum length of the device name
+
+// EEPROM address offsets for saving data
+#define MAC_START_ADDRESS 0 // Where to save the mac address in the eeprom (needs 6 bytes)
+#define DEVICE_NAME_ADDRESS 6 // Where to save the device name
+#define EEPROM_CARDS_START_ADDRESS 20 // Which address to start saving cards to. Should be the last address
 
 #define THISSNARC_OPEN_PIN 54  //54 on the mega, or 14 on the normal arduino
 #define THISSNARC_RFID_ENABLE_PIN 2
@@ -23,7 +46,6 @@ long interval = 1000;           // interval at which to blink (milliseconds)
 
 #include <Ethernet.h>
 
-#define CLIENT 1   // comment out this line to completely disable all ETHERNET and networking related code
 
 #include <SoftwareSerial.h>
 
@@ -34,12 +56,11 @@ long interval = 1000;           // interval at which to blink (milliseconds)
  * make sure the URL that is being used for your "auth server" is correct.  ( default is /auth.php? ) 
  * make sure you have it wired-up correctly! Code currently assumes the RFID reader is on Software Serial on RX/TX pins  D15 and D16 ( also sometimes called A1 and A2 )
 */
-void write_codes_to_eeprom(void);
-
 
 #ifdef CLIENT
 // network settings:
-byte mac[] = {  0xDE, 0xDA, 0xEB, 0xFE, 0xFE, 0xEE };
+byte mac[] = {0, 0 ,0 ,0 ,0 ,0};
+char device_name[DEVICE_NAME_MAX_LENGTH + 1]; // +1 for terminating char
 
 IPAddress ip(192,168,7,7); // client arduino
 
@@ -57,6 +78,8 @@ int client_recieve_pointer = 0;
 long unsigned int client_timeout;
 int x_client_finished;
 
+byte serial_recieve_data[SERIAL_RECIEVE_BUFFER_LENGTH];
+byte serial_recieve_index = 0;
 // be a http client, not a server, connect to port 80
 EthernetClient client;
 
@@ -97,14 +120,39 @@ enum AccessType {  INVALID, INNER , OUTER, BACK, OFFICE1, SHED, LIGHTS };
 
 void setup()
 {
+	randomSeed(analogRead(A1));
 
-    // set the data rate for the SoftwareSerial port
+	Serial.begin(19200);
 
+	Serial.println();
+	get_mac_address();
+	load_device_name();
 
-// logging/programming/USB interface   
-Serial.begin(19200);
+	// Display basic config details
+	Serial.print(F("Name: "));
+	print_device_name();
+	Serial.println();
+	#ifdef CLIENT
+	Serial.print(F("IP:   "));
+	// TODO: Print IP address
+	Serial.println();
+	Serial.print(F("MAC:  "));
+	print_mac_address();
+	Serial.println();
+	#endif
 
-Serial.println(F("started - network will initialise in approx 30 secs! "));
+	pinMode(ACTUATOR_PIN, OUTPUT);
+	digitalWrite(ACTUATOR_PIN, LOW);
+
+	#ifdef ENABLE_ESTOP
+	// Configure E-Stop pin
+	pinMode(ESTOP_PIN, INPUT);
+	digitalWrite(ESTOP_PIN, HIGH);
+	attachInterrupt(ESTOP_INTERRUPT_PIN, estop_interrupt_handler, LOW);
+	#endif
+
+	// logging/programming/USB interface   
+	Serial.println(F("started - network will initialise in approx 30 secs! "));
 
 
 
@@ -142,42 +190,80 @@ Serial.println(F("Entering Normal Mode! "));
 
 }
 
+void clear_serial_buffer ()
+{
+	while (Serial.available())
+	{
+		Serial.read();
+	}
+}
+
 void prompt() {
-Serial.println(F("PROGRAM MODE [r n x]>"));
+	Serial.println();
+	Serial.println(F("PROGRAM MODE:"));
+	Serial.println(F("r - read eeprom list"));
+	Serial.println(F("n - program new key to EEPROM"));
+	Serial.println(F("s - test key code against server"));
+	Serial.println(F("d - set device name"));
+	#ifdef CLIENT
+	Serial.println(F("m - set/reset MAC address"));
+	Serial.println(F("a - set device IP address"));
+	#endif
+	Serial.println();
+	Serial.println(F("x - exit programming mode"));
 }
 
 
 void programming_mode() {
 
-Serial.println(F("Press a few keys, then ENTER *NOW* to start programming mode ( 3...2...1... ) "));
-Serial.flush();
+	clear_serial_buffer();
+	Serial.println(F("Press a few keys, then ENTER *NOW* to start programming mode ( 3...2...1... ) "));
 
-delay(3000);
+	delay(3000);
 
-// three ENTER keys is >2, AND WE ARE IN PROGRAMMING MODE !  
-int incomingByte = 0;
-if (Serial.available() > 2) {
-  
-   
-    Serial.println(F("Entered Programming Mode! "));
-    Serial.println(F("Type 'r' to read eeprom list, 'n' to program new key to EEPROM. 'x' to exit mode. "));
-    prompt();
+	// three ENTER keys is >2, AND WE ARE IN PROGRAMMING MODE !  
+	int incomingByte = 0;
 
-    while( incomingByte != -1 ) {
+	#ifdef DEBUG
+	if (true) // DEBUG: Always enter programming mode
+	#else
+	if (Serial.available() > 2)
+	#endif
+	{
+	  	clear_serial_buffer();
+	    Serial.println(F("Entered Programming Mode! "));
+	    prompt();
+
+	    while( incomingByte != -1 ) {
      
-     led_flash(RED);   // RED FLASH FOR PROGRAMMING MODE
+		led_flash(RED);   // RED FLASH FOR PROGRAMMING MODE
 
-
-    if ( Serial.available() ) {
+		if ( Serial.available() ) {
       incomingByte = Serial.read();
       Serial.println((char)incomingByte);
 
       switch((char)incomingByte) {
-    case 's':
-        // test send to server
-        Serial.println(F("test send_to_server()"));
-        Serial.println(send_to_server("1234567890", 0));
-        break;
+		case 's':
+			// test send to server
+			Serial.println(F("test send_to_server()"));
+			Serial.println(send_to_server("1234567890", 0));
+	        prompt();
+			break;
+		#ifdef CLIENT
+		case 'm':
+			// set MAC address
+			listen_for_new_mac_address();
+	        prompt();
+			break;
+		case 'a':
+			// TODO: Implement IP address change
+			prompt();
+			break;
+		#endif
+		case 'd':
+			listen_for_device_name();
+			prompt();
+			break;
         // w means "write" initial LIST to EEPROM cache - undocumented command for initial population of eeprom only during transition.
       case 'w':
         write_codes_to_eeprom();
@@ -210,9 +296,7 @@ if (Serial.available() > 2) {
       case '\r':
       case '\n':
       case ' ':
-
         break;
-
         // n means write new code to EEPROM
         // ( the next key scanned
       case 'n':
@@ -250,13 +334,19 @@ if (Serial.available() > 2) {
         prompt();
         break;
       } //switch/case
+	  clear_serial_buffer();
     } // if
     } //while
 
 }  //END PROGRAMMING MODE
 
 Serial.println(F("Exited Programming Mode! "));
-
+#ifdef ENABLE_ESTOP
+	if (lockdown)
+	{
+		Serial.println(F("E-STOP triggered while in programming mode."));
+	}
+#endif
 }
 
 
@@ -343,7 +433,7 @@ int matchRfid(char * code)
 {
 int address = 0;
 int result = 0; // access level from EEPROM
-boolean match = false;
+bool match = false;
 
 while(!match)
 {
@@ -384,7 +474,7 @@ while((result = EEPROM.read(address*11)) != INVALID)
 {
     for(int i=0; i<10; i++)
     {
-    codeout[i] = EEPROM.read(address*11+i+1);
+		codeout[i] = EEPROM.read(EEPROM_CARDS_START_ADDRESS + address*11+i+1);
     }
     codeout[10] = '\0'; //end of string
 
@@ -400,37 +490,57 @@ last_address = address;
 
 // simpler/quieter variant of the above, used in different circumstance.
 void find_last_eeprom_code() {
+	int address = 0; // eeprom address pointer
+	int result = 0;  
+	//  char codeout[12]; // holder for code strings as we output them
 
-int address = 0; // eeprom address pointer
-int result = 0;  
-//  char codeout[12]; // holder for code strings as we output them
+	// read EEPROM in 11 byte chunks till we get an INVALID tag to label the end of them.
+	while((result = EEPROM.read(address*11)) != INVALID)
+	{
+		address++;
+	}
 
-// read EEPROM in 11 byte chunks till we get an INVALID tag to label the end of them.
-while((result = EEPROM.read(address*11)) != INVALID)
-{
-    address++;
-}
-
-last_address = address;
+	last_address = address;
 }
 
 void unlockDoor()
 {
-digitalWrite(THISSNARC_OPEN_PIN, HIGH);
-digitalWrite(LED_PIN1, HIGH);
-digitalWrite(LED_PIN2, LOW);
-Serial.println(F("OK: Opening internal door"));
-delay(2000);
-digitalWrite(THISSNARC_OPEN_PIN, LOW);
-digitalWrite(LED_PIN1, LOW);
-digitalWrite(LED_PIN2, LOW);
-//Serial.println(F("OK: Normalising internal door"));
+	digitalWrite(THISSNARC_OPEN_PIN, HIGH);
+	digitalWrite(LED_PIN1, HIGH);
+	digitalWrite(LED_PIN2, LOW);
+	Serial.println(F("OK: Opening internal door"));
+	delay(2000);
+	digitalWrite(THISSNARC_OPEN_PIN, LOW);
+	digitalWrite(LED_PIN1, LOW);
+	digitalWrite(LED_PIN2, LOW);
+	//Serial.println(F("OK: Normalising internal door"));
 }
 
+void actuator_on()
+{
+	#ifdef ENABLE_ESTOP
+	if (lockdown)
+	{
+		digitalWrite(ACTUATOR_PIN, LOW); // Force low
+		estop_lockdown();
+	}
+	#endif
+	digitalWrite(ACTUATOR_PIN, HIGH);
+}
 
+void actuator_off()
+{
+	digitalWrite(ACTUATOR_PIN, LOW);
+}
 
 void loop () {
-// char code[12]; // 10 chars of code , 1 byte of null terminator, and one byte of the door number.
+	#ifdef ENABLE_ESTOP
+	if (lockdown)
+	{
+		estop_lockdown();
+	}
+	#endif
+	// char code[12]; // 10 chars of code , 1 byte of null terminator, and one byte of the door number.
 
 // reset global variables each time thru
 last_code[10]=0; // null terminator
@@ -513,6 +623,12 @@ Serial.println(F("listening to READERS, please swipe a card now"));
 int  found = 0 ;
 while ( found == 0 ) {
 
+	#ifdef ENABLE_ESTOP
+	if (lockdown)
+	{
+		estop_lockdown();
+	}
+	#endif
 
     //     char code[12];
     int val;
@@ -570,26 +686,23 @@ Serial.flush();
 }
 
 void led_flash(int whichled) {
+	unsigned long currentMillis = millis();
 
-  unsigned long currentMillis = millis();
+	if (currentMillis - previousMillis > interval) {
+		// save the last time you blinked the LED
+		previousMillis = currentMillis;   
 
- if(currentMillis - previousMillis > interval) {
-    // save the last time you blinked the LED
-    previousMillis = currentMillis;   
-
-    // if the LED is off turn it on and vice-versa:
-    if (ledState == whichled)  {
-     ledState = OFF;
-     led_off();  //both off!
-    }
-    else {
-     ledState = whichled;
-     led_on(whichled);
-    }
-
- }
-
+	    // if the LED is off turn it on and vice-versa:
+	    if (ledState == whichled)  {
+			ledState = OFF;
+			led_off();  //both off!
+		} else {
+			ledState = whichled;
+			led_on(whichled);
+		}
+	}
 }
+
 void led_on(int which){
  if ( which == RED ) {
     digitalWrite(LED_PIN1, LOW);
@@ -599,6 +712,7 @@ void led_on(int which){
     digitalWrite(LED_PIN2, LOW);
  }
 }
+
 void led_off(){
     digitalWrite(LED_PIN1, LOW);
     digitalWrite(LED_PIN2, LOW);
@@ -627,28 +741,27 @@ char * codeListBoth[]  =
 
 void writeCode(int address, char * code, int accessLevel)
 {
-digitalWrite(LED_PIN1, HIGH);
-digitalWrite(LED_PIN2, LOW);
-//delay(10);
+	digitalWrite(LED_PIN1, HIGH);
+	digitalWrite(LED_PIN2, LOW);
+	//delay(10);
 
-Serial.print(F("Writing to address "));
-Serial.println(address);
+	Serial.print(F("Writing to address "));
+	Serial.println(address);
 
-Serial.print(F("Access "));
-Serial.println(accessLevel);
-EEPROM.write(address*11,accessLevel);
+	Serial.print(F("Access "));
+	Serial.println(accessLevel);
+	EEPROM.write(address*11,accessLevel);
 
-Serial.print(F("Code "));
-for(int i = 1; i<11; i++)
-{
-    EEPROM.write(address*11+i,code[i-1]);
-    Serial.print(code[i-1]);
-}
-Serial.println("");
+	Serial.print(F("Code "));
+	for(int i = 1; i<11; i++)
+	{
+		EEPROM.write(EEPROM_CARDS_START_ADDRESS + address * 11 + i, code[i-1]);
+		Serial.print(code[i-1]);
+	}
+	Serial.println("");
 
-digitalWrite(LED_PIN1, LOW);
-digitalWrite(LED_PIN2, LOW);
-
+	digitalWrite(LED_PIN1, LOW);
+	digitalWrite(LED_PIN2, LOW);
 }
 
 
@@ -666,36 +779,333 @@ writeCode( last_address, invalidCode, INVALID ) ; // termination code after loas
 
 void write_codes_to_eeprom()
 {
-int address = 0;
+	int address = 0;
 
-int codeIdx = 0;
-while(codeListBoth[codeIdx][0]!=0)
-{
-    writeCode(address, codeListBoth[codeIdx], THISSNARC);
-    address++;
-    codeIdx++;
+	int codeIdx = 0;
+	while(codeListBoth[codeIdx][0]!=0)
+	{
+		writeCode(address, codeListBoth[codeIdx], THISSNARC);
+		address++;
+		codeIdx++;
+	}
+
+	// char invalidCode[] = "          ";
+	writeCode(address, invalidCode, INVALID);
+	Serial.println(F("Finished"));
+
+	last_address = address;
 }
 
-// char invalidCode[] = "          ";
-writeCode(address, invalidCode, INVALID);
-Serial.println(F("Finished"));
-
-last_address = address;
-
-}
-
-// wipres eeprom, and initialised it for codes bbeing programmed later
+// wipes eeprom, and initialised it for codes bbeing programmed later
 void init_eeprom()
 {
-int address = 1;
+	int address = 0;
 
-writeCode(address, invalidCode, INVALID);
-Serial.println(F("Init Finished"));
+	writeCode(address, invalidCode, INVALID);
+	Serial.println(F("Init Finished"));
 
-last_address = address;
-
+	last_address = address;
 }
 
 
+// MAC address stuff
+void print_mac_address ()
+{
+	if (mac[0] < 16)
+	{
+		Serial.print('0');
+	}
+	Serial.print(mac[0], HEX);
+	Serial.print(':');
+	if (mac[1] < 16)
+	{
+		Serial.print('0');
+	}
+	Serial.print(mac[1], HEX);
+	Serial.print(':');
+	if (mac[2] < 16)
+	{
+		Serial.print('0');
+	}
+	Serial.print(mac[2], HEX);
+	Serial.print(':');
+	if (mac[3] < 16)
+	{
+		Serial.print('0');
+	}
+	Serial.print(mac[3], HEX);
+	Serial.print(':');
+	if (mac[4] < 16)
+	{
+		Serial.print('0');
+	}
+	Serial.print(mac[4], HEX);
+	Serial.print(':');
+	if (mac[5] < 16)
+	{
+		Serial.print('0');
+	}
+	Serial.print(mac[5], HEX);
+}
 
+void save_mac_address ()
+{
+	for (byte i = 0; i < 6; i++)
+	{
+		EEPROM.write(MAC_START_ADDRESS + i, mac[i]);
+	}
+}
 
+void generate_random_mac_address ()
+{
+	set_mac_address(random(0, 255), random(0, 255), random(0, 255), random(0, 255), random(0, 255), random(0, 255));
+}
+
+void get_mac_address ()
+{
+	bool hasNeverBeenSaved = true;
+	for (byte i = 0; i < 6; i++)
+	{
+		mac[i] = EEPROM.read(MAC_START_ADDRESS + i);
+		if (mac[i] != 255)  // If a EEPROM cell has never been written to before, it returns 255 (accordoing to Arduino doco)
+		{
+			hasNeverBeenSaved = false;
+		}
+	}
+	if (hasNeverBeenSaved)
+	{
+		Serial.print(F("Generating random MAC address: "));
+		generate_random_mac_address();
+		print_mac_address();
+		Serial.println();
+	}
+}
+
+void set_mac_address (byte octet0, byte octet1, byte octet2, byte octet3, byte octet4, byte octet5)
+{
+	mac[0] = octet0;
+	mac[1] = octet1;
+	mac[2] = octet2;
+	mac[3] = octet3;
+	mac[4] = octet4;
+	mac[5] = octet5;
+	save_mac_address();
+}
+
+/*
+Listens for new MAC address over serial or creates random. Warning... here be dragons...
+*/
+void listen_for_new_mac_address () // blocking operation
+{
+	
+	Serial.print(F("Current MAC address is "));
+	print_mac_address();
+	Serial.println();
+
+	Serial.println(F("Enter new MAC address 01:23:45:67:89:AB (enter a newline for random MAC address):"));
+	byte b;
+	byte bi = 0; // Index for octetB
+	byte index = 0;
+	byte acc = 0;
+	byte octetB[] = {0, 0};
+	char macOctets[] = {0, 0, 0, 0, 0, 0};
+	clear_serial_buffer();
+	while (true)
+	{
+		if (Serial.available())
+		{
+			b = Serial.read();
+			if (b == 10 || b == 13)
+			{
+				if (index == 0)
+				{
+					// Nothing entered, use random MAC
+					generate_random_mac_address();
+					Serial.print(F("New MAC: "));
+					print_mac_address();
+					Serial.println();
+				}
+				else if (index == 6)
+				{
+					// nothing. Should be valid.
+				}
+				else
+				{
+					Serial.println(F("Invalid mac address!"));
+				}
+				break;
+			}
+			else if ((b >= 48 && b <= 58) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70)) // 0-9: || a-z || A-Z
+			{
+				if (b >= 48 && b <= 57) // 0-9
+				{
+					acc *= 16;
+					acc += (b - 48);
+					bi++;
+				}
+				else if (b != 58) // (a-f || A-F)
+				{
+					if (b >= 97) // convert to uppercase
+					{
+						b -= 32;
+					}
+					acc *= 16;
+					acc += (b - 55);
+					bi++;
+				}
+				if (bi == 2 && index == 5)
+				{
+					b = 58; // Force b = 58 so that the final octet is added
+				}
+				else if (bi > 2)
+				{
+					// Invalid
+					Serial.println(F("Invalid mac address!"));
+					break;
+				}
+				
+				if (b == 58) // :
+				{
+					if (bi == 2)
+					{
+						// Set octet & reset counters
+						macOctets[index++] = acc;
+						acc = 0;
+						bi = 0;
+						if (index == 6)
+						{
+							// Done. Save
+							set_mac_address(macOctets[0], macOctets[1], macOctets[2], macOctets[3], macOctets[4], macOctets[5]);
+							print_mac_address();
+							Serial.println();
+							break;
+						}
+					}
+					else if (bi > 2)
+					{
+						Serial.println(F("Invalid mac address!"));
+					}
+				}
+			}
+			else
+			{
+				// Invalid
+				Serial.println(F("Invalid mac address!"));
+				break;
+			}
+		}
+	}
+	clear_serial_buffer();
+}
+
+// Device name
+void print_device_name()
+{
+	Serial.print(device_name);
+}
+
+void save_device_name()
+{
+	for (byte i = 0; i <= DEVICE_NAME_MAX_LENGTH; i++) // the "<=" is to accomodate the extra null character that's needed to terminate the string.
+	{
+		EEPROM.write(DEVICE_NAME_ADDRESS + i, (byte)device_name[i]);
+	}
+}
+
+void load_device_name()
+{
+	for (byte i = 0; i <= DEVICE_NAME_MAX_LENGTH; i++) // the "<=" is to accomodate the extra null character that's needed to terminate the string.
+	{
+		device_name[i] = (char)EEPROM.read(DEVICE_NAME_ADDRESS + i);
+	}
+}
+
+void listen_for_device_name()
+{
+	Serial.print(F("Current device name is: "));
+	print_device_name();
+	Serial.println();
+
+	Serial.print(F("Enter new device name (max "));
+	Serial.print(DEVICE_NAME_MAX_LENGTH);
+	Serial.println(F(" characters):"));
+	
+	serial_recieve_index = 0;
+	clear_serial_buffer();
+
+	bool keepReading = true;
+	while (keepReading)
+	{
+		while (Serial.available())
+		{
+			if (Serial.peek() == 13 || Serial.peek() == 10)
+			{
+				// new line. End entry
+				keepReading = false;
+				break;
+			}
+			serial_recieve_data[serial_recieve_index++] = Serial.read();
+			if (serial_recieve_index >= SERIAL_RECIEVE_BUFFER_LENGTH)
+			{
+				// max length. End entry
+				keepReading = false;
+				break;
+			}
+		}
+	}
+	clear_serial_buffer();
+
+	if (serial_recieve_index == 0)
+	{
+		// Empty, do not save.
+		Serial.println(F("No input detected. No changes made."));
+	}
+	else
+	{
+		// Echo & save new name
+		Serial.print(F("Device name set to: "));
+		byte i;
+		for (i = 0; i < serial_recieve_index; i++)
+		{
+			device_name[i] = (char)serial_recieve_data[i];
+			Serial.print(device_name[i]);
+		}
+		// Fill rest of device name array with null chars
+		for (; i <= DEVICE_NAME_MAX_LENGTH; i++)
+		{
+			device_name[i] = '\0';
+		}
+		Serial.println();
+		save_device_name();
+	}
+}
+
+// ESTOP functionality
+#ifdef ENABLE_ESTOP
+void broadcast_estop()
+{
+	// TODO: Implement
+}
+
+void estop_interrupt_handler()
+{
+	actuator_off();
+	lockdown = true;
+}
+
+void estop_lockdown()
+{
+	detachInterrupt(ESTOP_INTERRUPT_PIN); // disable estop interrupt so repeated estop presses won't cause weird/mistimed LED blinks.
+	Serial.println(F("LOCKED DOWN!!!"));
+	broadcast_estop();
+	interval = 250; // Make flash faster.
+	led_on(RED);
+	while (true)
+	{
+		// Lockdown loop
+		led_flash(RED);
+	}
+	attachInterrupt(ESTOP_INTERRUPT_PIN, estop_interrupt_handler, FALLING);
+}
+
+#endif
