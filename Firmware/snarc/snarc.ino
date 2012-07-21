@@ -22,7 +22,6 @@ long interval = 1000;           // interval at which to blink (milliseconds)
 
 #include <Ethernet.h>
 
-
 #include <SoftwareSerial.h>
 
 #include "utils.h"
@@ -71,13 +70,9 @@ unsigned int last_address = 0;
 // this may be used by find_code_in_eeprom() to point to the last-located code's EEPROM address ( for if we need to update it)
 unsigned int last_found_address = 0;
 
-
 // last detected code, and which door it was that triggered it.
 unsigned long last_code = 0;
 int  last_door ;
-
-//when writing an invalid code, write this one:
-char invalidCode[] = "          ";
 
 // If you use more than one door in a "set" of readers, you can name there all here. Keep this consistent between all doors, and also the auth.php script needs it too! 
 // Always put "INVALID" as the first element, then other elements follow:
@@ -85,7 +80,6 @@ char invalidCode[] = "          ";
 enum AccessType {  INVALID, INNER , OUTER, BACK, OFFICE1, SHED, LIGHTS };
 // eg one door system:
 //enum AccessType {  INVALID, INNER };
-
 
 //  Which of the above list is this particulare one?  ( this should be different for each door/reader that has different permissions ) 
 //  This tells us which "bit" in the access data we should consider ours! 
@@ -143,24 +137,24 @@ void setup()
 
 
 
-// "request exit" button input
-//pinMode(REX_PIN, INPUT);
-//digitalWrite(REX_PIN, HIGH);
+	// "request exit" button input
+	//pinMode(REX_PIN, INPUT);
+	//digitalWrite(REX_PIN, HIGH);
 
-// status led
-pinMode(LED_PIN1, OUTPUT);
-pinMode(LED_PIN2, OUTPUT);
+	// status led
+	pinMode(LED_PIN1, OUTPUT);
+	pinMode(LED_PIN2, OUTPUT);
 
-digitalWrite(LED_PIN1, LOW);
-digitalWrite(LED_PIN2, LOW);
- ledState = OFF;
+	digitalWrite(LED_PIN1, LOW);
+	digitalWrite(LED_PIN2, LOW);
+	 ledState = OFF;
 
-// Inner Door reader
-RFIDSerial.begin(2400); // RFID reader SOUT pin connected to Serial RX pin at 2400bps
-pinMode(THISSNARC_RFID_ENABLE_PIN, OUTPUT); // RFID /ENABLE pin
-digitalWrite(THISSNARC_RFID_ENABLE_PIN, LOW);
-pinMode(THISSNARC_OPEN_PIN, OUTPUT); // Setup internal door open
-digitalWrite(THISSNARC_OPEN_PIN, LOW);
+	// Inner Door reader
+	RFIDSerial.begin(2400); // RFID reader SOUT pin connected to Serial RX pin at 2400bps
+	pinMode(THISSNARC_RFID_ENABLE_PIN, OUTPUT); // RFID /ENABLE pin
+	digitalWrite(THISSNARC_RFID_ENABLE_PIN, LOW);
+	pinMode(THISSNARC_OPEN_PIN, OUTPUT); // Setup internal door open
+	digitalWrite(THISSNARC_OPEN_PIN, LOW);
 
 
 	// Ethernet module
@@ -509,7 +503,6 @@ int send_to_server(char *tag, int door ) {
 
 int matchRfid(unsigned long code)
 {
-	// TODO: Implement
 	int cardAddress = 0;
 	int readAddress = EEPROM_CARDS_START_ADDRESS;
 	int result = 0;
@@ -556,38 +549,41 @@ int matchRfid(unsigned long code)
 
 // scan the EEPROM looking for a matching RFID code, and return it if it's found
 //also, as a side-affect, we leave 
+/*
 int matchRfid(char * code)
 {
-int address = 0;
-int result = 0; // access level from EEPROM
-bool match = false;
+	int address = 0;
+	int result = 0; // access level from EEPROM
+	bool match = false;
 
-while(!match)
-{
-    if((result = EEPROM.read(address*11)) == INVALID)
-    {
-		// end of list
-		Serial.println(F("Error: No tag match"));
-		return INVALID;
-    }
-    match = true;
-    for(int i=0; i<10; i++)
+	
+	while(!match)
 	{
-	    if(EEPROM.read(address*11+i+1) != code[i])
+	    if((result = EEPROM.read(address*11)) == INVALID)
 	    {
+			// end of list
+			Serial.println(F("Error: No tag match"));
+			return INVALID;
+		}
+		match = true;
+		for(int i=0; i<10; i++)
+		{
+			if(EEPROM.read(address*11+i+1) != code[i])
+			{
 			match = false;
 			break;
 		}
     }
     address++;
 }
-Serial.print(F("OK: Match found, access "));
-Serial.println(result);
+	Serial.print(F("OK: Match found, access "));
+	Serial.println(result);
 
-last_found_address = address-1; //remember it incase we need to "UPDATE" this location later....
+	last_found_address = address-1; //remember it incase we need to "UPDATE" this location later....
 
-return result;
+	return result;
 }
+*/
 
 // pull the codes from EEPROM, emit to Serial0
 void read_eeprom_codes() {
@@ -763,47 +759,43 @@ void listen_for_codes ( void )
 
 		if (RFIDSerial.available() > 0) // input waiting from internal rfid reader
 		{
-		if ((val = RFIDSerial.read()) == 10)
-		{
-		  int bytesread = 0;
-		  while (bytesread < 10)
-		  { // read 10 digit code
-			if (RFIDSerial.available() > 0)
+			if ((val = RFIDSerial.read()) == 10)
 			{
-			  val = Serial.read();
-			  bytesread++;
-			  Serial.println(val);
-			  if ((val == 10) || (val == 13))
-			  {
-				break;
+			  int bytesread = 0;
+			  while (bytesread < 10)
+			  { // read 10 digit code
+				if (RFIDSerial.available() > 0)
+				{
+				  val = Serial.read();
+				  bytesread++;
+				  Serial.println(val);
+				  if ((val == 10) || (val == 13))
+				  {
+					break;
+				  }
+				  last_code = last_code * 10 + (val - 48);
+				}
 			  }
-			  last_code = last_code * 10 + (val - 48);
+			  if(bytesread == 10)
+			  {
+				Serial.println(F("TAG detected!"));
+				Serial.println(last_code);  //don't tell user the full tag number
+
+				// just in case.....
+				Serial.flush();
+				RFIDSerial.flush();
+
+				// which door was this?
+				last_door = THISSNARC;
+
+				found = 1 ;
+
+			  }
+			  Serial.flush();
+			  bytesread = 0;
 			}
-		  }
-		  if(bytesread == 10)
-		  {
-			Serial.println(F("TAG detected!"));
-			Serial.println(last_code);  //don't tell user the full tag number
-
-			// just in case.....
-			Serial.flush();
-			RFIDSerial.flush();
-
-			// which door was this?
-			last_door = THISSNARC;
-
-			found = 1 ;
-
-		  }
-		  Serial.flush();
-		  bytesread = 0;
 		}
-
-		}
-
-
 	}
-
 	Serial.flush();
 }
 

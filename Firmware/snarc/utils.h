@@ -65,3 +65,15 @@ void serialListenForInput (int readLength, long timeout, bool endOnNewLine, bool
 	}
 }
 
+/*
+unsigned long stringToULong (char * uLongString)
+{
+	int i = 0;
+	unsigned long output = 0;
+	while (uLongString[i] != '\0')
+	{
+		output = output * 10 + (uLongString[i++] - 48);
+	}
+	return output;
+}
+*/
