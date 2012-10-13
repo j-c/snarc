@@ -1,3 +1,8 @@
+#ifndef UTILS_H_
+#define UTILS_H_
+
+#include "configuration.h"
+
 // Temporary storage & output for serial read
 char serial_recieve_data[SERIAL_RECIEVE_BUFFER_LENGTH];
 int serial_recieve_index = 0;
@@ -77,3 +82,4 @@ unsigned long stringToULong (char * uLongString)
 	return output;
 }
 */
+#endif

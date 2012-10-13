@@ -1,38 +1,33 @@
-// https://github.com/j-c/snarc
+// Buzz 28 Mar 2012
+// see https://github.com/davidbuzz/snarc for more info
 
-#include "MemoryFree.h"
+#include <SPI.h> //needed by Ethernet.h
+#include <EEPROM.h>
+#include <Ethernet.h>
+#include <SoftwareSerial.h>
+
 #include "configuration.h"
+
+#include "utils.h"
+#include "IRFIDReader.h"
+
+// Pin connected to MOSFET that'll act as a switch for door strikes, power tools, etc.
+#include "DoorActuator.h"
+#include "IActuator.h"
+
+// flashing GREEN LED means operating correctly!
+// flashing RED LED means "in programming mode"
+// fast flashing RED LED means under E-STOP condition.
+
+enum LEDSTATES { RED , GREEN , OFF } ;
+int ledState = RED;  // toggle to turn the LEDS on/off/etc
+long previousMillis = 0;
+long interval = 1000;           // interval at which to blink (milliseconds)
+
 
 #ifdef ENABLE_ESTOP
 	bool lockdown = false;
 #endif
-
-#include <EEPROM.h>
-
-#ifdef ETHERNET
-	#include <SPI.h> //needed by Ethernet.h
-	#include <Ethernet.h>
-#endif
-
-#include <SoftwareSerial.h>
-
-
-#include "utils.h"
-#include "led.h"
-#include "ProgrammingMode.h"
-
-#include "IRFIDReader.h"
-#include "IAuthenticator.h"
-#include "IActuator.h"
-
-// Single RED FLASH with BLINKING GREEN programming mode. Will FLASH RED with each command.
-// Single RED FLASH during operation means card ID does not have access.
-// Single GREEN FLASH during operation means card ID has access.
-// SOLID RED with BLINKING GREEN means E-Stop condition.
-
-
-char device_name[DEVICE_NAME_MAX_LENGTH + 1]; // +1 for terminating char
-
 
 
 /* USAGE: be sure to revise this script for each peice of hardware:
@@ -42,10 +37,11 @@ char device_name[DEVICE_NAME_MAX_LENGTH + 1]; // +1 for terminating char
  * make sure you have it wired-up correctly! Code currently assumes the RFID reader is on Software Serial on RX/TX pins  D15 and D16 ( also sometimes called A1 and A2 )
 */
 
-#ifdef ETHERNET
+#ifdef CLIENT
 // network settings:
 byte mac[] = {0, 0 ,0 ,0 ,0 ,0};
 byte clientIpBytes[] = {0, 0, 0, 0};
+char device_name[DEVICE_NAME_MAX_LENGTH + 1]; // +1 for terminating char
 
 IPAddress ip(192,168,7,7); // client arduino
 
@@ -65,38 +61,55 @@ int x_client_finished;
 
 // be a http client, not a server, connect to port 80
 EthernetClient client;
-#else
-	char client_recieve_data[16];
-	int client_recieve_pointer = 0;
-	long unsigned int client_timeout;
+
 #endif
 
+SoftwareSerial RFIDSerial(15, 16);  //RFID reader is on Soft Serial port.   A1-A5 are D15-D20
 RFID_READER_CLASS rfidReaderInstance;
 IRFIDReader * rfidReader = &rfidReaderInstance;
 
-AUTHENTICATOR_CLASS authenticatorInstance;
-MockAuthenticator * authenticator = &authenticatorInstance;
-
-ACTUATOR_CLASS actuatorInstance;
+DoorActuator actuatorInstance;
 IActuator * actuator = &actuatorInstance;
 
+// where in EEPROM do we write the next EEPROM?
+// this field is populated by either write_codes_to_eeprom() or read_eeprom_codes() or find_last_eeprom_code()
+// and after each of tehse will be left pointing to the "next slot" in the EEPROM to write to
+unsigned int last_address = 0;
 
+// this may be used by find_code_in_eeprom() to point to the last-located code's EEPROM address ( for if we need to update it)
+unsigned int last_found_address = 0;
+
+// last detected code, and which door it was that triggered it.
+unsigned long last_code = 0;
+int  last_door ;
+
+// If you use more than one door in a "set" of readers, you can name there all here. Keep this consistent between all doors, and also the auth.php script needs it too! 
+// Always put "INVALID" as the first element, then other elements follow:
+// eg multi-door system: 
 enum AccessType {  INVALID, INNER , OUTER, BACK, OFFICE1, SHED, LIGHTS };
 // eg one door system:
-// enum AccessType {  INVALID, INNER };
+//enum AccessType {  INVALID, INNER };
 
 //  Which of the above list is this particulare one?  ( this should be different for each door/reader that has different permissions ) 
 //  This tells us which "bit" in the access data we should consider ours! 
 // eg: this means that if the server sends "access:1, then only the "INNER" door is permitted. if the server sends "access:3" then both the INNER and OUTER door are permitted.  If it sends "access:8" then only "SHED" is permittd  ( it's a bit-mask ) 
 #define THISSNARC SHED // in this case, this means any number with bit 5 set to 1 will cause us to trigger the mosfet nad "open door", eg, the number 16
 
+void serialListenForInput ()
+{
+	serialListenForInput(-1, -1, true, true, true);
+}
+
+/**
+ * Clears data from the serial buffer
+ */
+
 
 void setup()
 {
-	// Needed for random MAC address
 	randomSeed(analogRead(A1));
 
-	Serial.begin(SNARC_BAUD_RATE);
+	Serial.begin(19200);
 
 	Serial.println();
 	load_device_name();
@@ -105,8 +118,7 @@ void setup()
 	Serial.print(F("Name: "));
 	print_device_name();
 	Serial.println();
-
-	#ifdef ETHERNET
+	#ifdef CLIENT
 	load_ip_address();
 	ip = IPAddress(clientIpBytes[0], clientIpBytes[1], clientIpBytes[2], clientIpBytes[3]);
 	Serial.print(F("IP:   "));
@@ -123,19 +135,39 @@ void setup()
 	digitalWrite(ACTUATOR_PIN, LOW);
 
 	#ifdef ENABLE_ESTOP
-	eStopInit();
+	// Configure E-Stop pin
+	pinMode(ESTOP_PIN, INPUT);
+	digitalWrite(ESTOP_PIN, HIGH);
+	attachInterrupt(ESTOP_INTERRUPT_PIN, estop_interrupt_handler, LOW);
 	#endif
 
-	Serial.println(F("Started"));
+	// logging/programming/USB interface   
+	Serial.println(F("started - network will initialise in approx 30 secs! "));
 
-	// Status LEDs
-	pinMode(RED_LED_PIN, OUTPUT);
-	digitalWrite(RED_LED_PIN, LOW);
-	pinMode(GREEN_LED_PIN, OUTPUT);
-	digitalWrite(GREEN_LED_PIN, LOW);
+
+
+	// "request exit" button input
+	//pinMode(REX_PIN, INPUT);
+	//digitalWrite(REX_PIN, HIGH);
+
+	// status led
+	pinMode(LED_PIN1, OUTPUT);
+	pinMode(LED_PIN2, OUTPUT);
+
+	digitalWrite(LED_PIN1, LOW);
+	digitalWrite(LED_PIN2, LOW);
+	 ledState = OFF;
+
+	// Inner Door reader
+	RFIDSerial.begin(2400); // RFID reader SOUT pin connected to Serial RX pin at 2400bps
+	pinMode(THISSNARC_RFID_ENABLE_PIN, OUTPUT); // RFID /ENABLE pin
+	digitalWrite(THISSNARC_RFID_ENABLE_PIN, LOW);
+	pinMode(THISSNARC_OPEN_PIN, OUTPUT); // Setup internal door open
+	digitalWrite(THISSNARC_OPEN_PIN, LOW);
+
 
 	// Ethernet module
-	#ifdef ETHERNET
+	#ifdef CLIENT
 	bool useDhcp = true;
 	for (byte i = 0; i < 4; i++)
 	{
@@ -160,72 +192,41 @@ void setup()
 	}
 	#endif
 
-	programmingMode();
+	programming_mode();
 
 
 	Serial.println(F("Entering Normal Mode! "));
 }
 
 
-void loop ()
-{
-	manageLeds();
-
-	#ifdef ENABLE_ESTOP
-	if (lockdown)
-	{
-		eStopLockdown();
-	}
-	#endif
-
-	
-	// Check to see if card is available
-	if (rfidReader->available())
-	{
-		Serial.print("Memory free: ");
-		Serial.println(freeMemory());
-		Serial.print("E-Stop pin: ");
-		Serial.println(digitalRead(ESTOP_PIN) ? "HIGH" : "LOW");
-		Serial.print("Lockdown: ");
-		Serial.println(lockdown ? "true" : "false");
-		unsigned long id = rfidReader->read();
-		if (authenticator->authenticate(id, device_name))
-		{
-			// Success
-			flashLed(GREEN, 2000);
-			manageLeds();
-			Serial.println(F("ID has access"));
-			actuator->on();
-		}
-		else
-		{
-			// Fail
-			flashLed(RED, 1000);
-			Serial.println(F("ID does not have access"));
-			// TODO: Implement timeout and turn off if no valid card found
-		}
-	}
-
-}
-
-
-
-
-
-// EVERYTHING BELOW HERE WILL MOST LIKELY DIE IN A FIRE
-int last_code = 0;
-int last_door = 0;
-int last_address = 0;
-int last_found_address = 0;
-
 void clear_serial_buffer ()
 {
-	// nothing
+	while (Serial.available())
+	{
+		Serial.read();
+	}
 }
-void prompt(){}
+
+void prompt() {
+	Serial.println();
+	Serial.println(F("PROGRAM MODE:"));
+	Serial.println(F("r - read eeprom list"));
+	Serial.println(F("n - program new key to EEPROM"));
+	Serial.println(F("s - test key code against server"));
+	Serial.println(F("d - set device name"));
+	#ifdef CLIENT
+	Serial.println(F("m - set/reset MAC address"));
+	Serial.println(F("a - set device IP address (ipv4)"));
+	#endif
+	Serial.println();
+	Serial.println(F("x - exit programming mode"));
+	Serial.println(rfidReader->read());
+}
+
+
 void programming_mode() {
-/*
-	clearSerial();
+
+	clear_serial_buffer();
 	Serial.println(F("Press ENTER within 3 seconds to enter programming mode"));
 	serialListenForInput(1, 3000, false, true, true);
 	int incomingByte = 0;
@@ -242,7 +243,7 @@ void programming_mode() {
 
 	    while( incomingByte != -1 ) {
      
-		//led_flash(RED);   // RED FLASH FOR PROGRAMMING MODE
+		led_flash(RED);   // RED FLASH FOR PROGRAMMING MODE
 
 		if ( Serial.available() ) {
       incomingByte = Serial.read();
@@ -255,7 +256,7 @@ void programming_mode() {
 			Serial.println(send_to_server((unsigned long)1234567890, 0));
 	        prompt();
 			break;
-		#ifdef ETHERNET
+		#ifdef CLIENT
 		case 'm':
 			// set MAC address
 			listen_for_new_mac_address();
@@ -275,14 +276,14 @@ void programming_mode() {
       case 'w':
         write_codes_to_eeprom();
         Serial.print(F("address:"));
-        //Serial.println(last_address);
+        Serial.println(last_address);
         prompt();
         break;
         
       case 'i':
         init_eeprom(); //wipe all codes
         Serial.print(F("address:"));
-        //Serial.println(last_address);
+        Serial.println(last_address);
         prompt();
         break;
 
@@ -290,7 +291,7 @@ void programming_mode() {
       case 'r':
         read_eeprom_codes();
         Serial.print(F("address:"));
-        //Serial.println(last_address);
+        Serial.println(last_address);
         prompt();
         break;
 
@@ -318,7 +319,7 @@ void programming_mode() {
           unlockDoor(); // clunk the door as user feedback
 
           // see if the key already has access
-          int access =  0;//matchRfid(last_code) & 0xF;
+          int access = matchRfid(last_code) & 0xF;
 
 
 	  // IF THIS DOOR/READER is not already in the permitted access list from the EEPROM/SERVER allow it! 
@@ -345,6 +346,7 @@ void programming_mode() {
 	  clear_serial_buffer();
     } // if
     } //while
+
 }  //END PROGRAMMING MODE
 
 Serial.println(F("Exited Programming Mode! "));
@@ -354,7 +356,6 @@ Serial.println(F("Exited Programming Mode! "));
 		Serial.println(F("E-STOP triggered while in programming mode."));
 	}
 #endif
-	*/
 }
 
 int send_to_server(unsigned long tag, int door )
@@ -365,7 +366,7 @@ int send_to_server(unsigned long tag, int door )
 	Serial.print(tag);
 	Serial.println(F(" .")); // needed by space server auth script to represent end-of-communication.
 
-	#ifdef ETHERNET
+	#ifdef CLIENT
 	// REPORT TO HTTP GET REQUEST:
 	if (client.connect(server,80)) {
 		Serial.println(F("http client connected"));
@@ -390,7 +391,7 @@ int send_to_server(unsigned long tag, int door )
 	// from the server, read them and print them:
 	client_timeout=millis();
 	client_recieve_pointer = 0;
-	#ifdef ETHERNET
+	#ifdef CLIENT
 		for (;;)
 		{
 		  if (client.available())
@@ -442,7 +443,7 @@ int send_to_server(char *tag, int door ) {
 	Serial.print(tag);
 	Serial.println(F(" .")); // needed by space server auth script to represent end-of-communication.
 
-	#ifdef ETHERNET
+	#ifdef CLIENT
 	// REPORT TO HTTP GET REQUEST:
 	if (client.connect(server,80)) {
 		Serial.println(F("http client connected"));
@@ -467,7 +468,7 @@ int send_to_server(char *tag, int door ) {
 	// from the server, read them and print them:
 	client_timeout=millis();
 	client_recieve_pointer = 0;
-	#ifdef ETHERNET
+	#ifdef CLIENT
 		for (;;)
 		{
 		  if (client.available())
@@ -584,7 +585,7 @@ void read_eeprom_codes()
 		cardAddress++;
 		readAddress = EEPROM_CARDS_START_ADDRESS + cardAddress * 5;
 	}
-	//last_address = cardAddress;
+	last_address = cardAddress;
 }
 
 // simpler/quieter variant of the above, used in different circumstance.
@@ -599,7 +600,7 @@ void find_last_eeprom_code() {
 		address++;
 	}
 
-	//last_address = address;
+	last_address = address;
 }
 
 void unlockDoor()
@@ -615,7 +616,7 @@ void actuator_on()
 	if (lockdown)
 	{
 		digitalWrite(ACTUATOR_PIN, LOW); // Force low
-		eStopLockdown();
+		estop_lockdown();
 	}
 	#endif
 	Serial.println(F("OK: Activating actuator."));
@@ -628,16 +629,16 @@ void actuator_off()
 	actuator->off();
 }
 
-void loop2 () {
+void loop () {
 	#ifdef ENABLE_ESTOP
 	if (lockdown)
 	{
-		eStopLockdown();
+		estop_lockdown();
 	}
 	#endif
 	
 	// reset global variables each time thru
-	//last_code = 0;
+	last_code = 0;
 	last_door =  INVALID;
 
 	listen_for_codes();   // blocking, waits for a code/door combo, then writes the result into global last_code and last_door
@@ -698,7 +699,6 @@ void loop2 () {
 void listen_for_codes ( void )
 {
 	// before starting to listen, clear all the Serial buffers:
-	/*
 	while (RFIDSerial.available() > 0) {
 		RFIDSerial.read();
 	}
@@ -763,17 +763,40 @@ void listen_for_codes ( void )
 			}
 		}
 	}
-	*/
 	Serial.flush();
 }
 
 void led_flash(int whichled) {
+	unsigned long currentMillis = millis();
+
+	if (currentMillis - previousMillis > interval) {
+		// save the last time you blinked the LED
+		previousMillis = currentMillis;   
+
+	    // if the LED is off turn it on and vice-versa:
+	    if (ledState == whichled)  {
+			ledState = OFF;
+			led_off();  //both off!
+		} else {
+			ledState = whichled;
+			led_on(whichled);
+		}
+	}
 }
 
 void led_on(int which){
+ if ( which == RED ) {
+    digitalWrite(LED_PIN1, LOW);
+    digitalWrite(LED_PIN2, HIGH);
+ } else {
+        digitalWrite(LED_PIN1, HIGH);
+    digitalWrite(LED_PIN2, LOW);
+ }
 }
 
 void led_off(){
+    digitalWrite(LED_PIN1, LOW);
+    digitalWrite(LED_PIN2, LOW);
 }
 
 
@@ -816,8 +839,8 @@ void writeCode (int address, char *code, byte accessLevel)
 void writeCode (int address, unsigned long code, byte accessLevel)
 {
 	int writeAddress = EEPROM_CARDS_START_ADDRESS + address * 5;
-	//digitalWrite(LED_PIN1, HIGH);
-	//digitalWrite(LED_PIN2, LOW);
+	digitalWrite(LED_PIN1, HIGH);
+	digitalWrite(LED_PIN2, LOW);
 	//delay(10);
 
 	Serial.print(F("Writing to address "));
@@ -838,8 +861,8 @@ void writeCode (int address, unsigned long code, byte accessLevel)
     
 	Serial.println(code);
 	
-	//digitalWrite(LED_PIN1, LOW);
-	//digitalWrite(LED_PIN2, LOW);
+	digitalWrite(LED_PIN1, LOW);
+	digitalWrite(LED_PIN2, LOW);
 }
 
 void write_next_code_to_eeprom(char *code, byte dooraccess)
@@ -852,9 +875,9 @@ void write_next_code_to_eeprom(unsigned long code, byte dooraccess)
 {
 	// first locate the end of the EEPROM list. Updates last_address variable to correct value without any output.
 	find_last_eeprom_code();  
-	//writeCode( last_address, code, dooraccess ) ;
+	writeCode( last_address, code, dooraccess ) ;
 	last_address++;
-	//writeCode( last_address, (unsigned long)0, INVALID ) ; // termination code after last code is ESSENTIAL to know where end of list is.
+	writeCode( last_address, (unsigned long)0, INVALID ) ; // termination code after last code is ESSENTIAL to know where end of list is.
 }
 
 void write_codes_to_eeprom()
@@ -867,7 +890,7 @@ void write_codes_to_eeprom()
 	writeCode(address, (unsigned long)0, INVALID);
 	Serial.println(F("Finished"));
 
-	//last_address = address;
+	last_address = address;
 }
 
 // wipes eeprom, and initialised it for codes being programmed later
@@ -876,12 +899,11 @@ void init_eeprom()
 	int address = 0;
 	writeCode(address, (unsigned long)0, INVALID);
 	Serial.println(F("Init Finished"));
-	//last_address = address;
+	last_address = address;
 }
 
 
 // MAC address stuff
-#ifdef ETHERNET
 void print_mac_address ()
 {
 	if (mac[0] < 16)
@@ -1206,7 +1228,6 @@ void listen_for_ip_address()
 		}
 	}
 }
-#endif
 
 // Device name
 void print_device_name()
@@ -1290,43 +1311,32 @@ void listen_for_device_name()
 	}
 }
 
-// Stuff under here is still good
-/**
- * Start: E-Stop
- */
-void eStopInit ()
-{
-	// Configure E-Stop pin
-	pinMode(ESTOP_PIN, INPUT);
-	digitalWrite(ESTOP_PIN, HIGH);
-	attachInterrupt(ESTOP_INTERRUPT_PIN, eStopInterruptHandler, LOW);
-}
-
-void eStopBroadcast ()
+// ESTOP functionality
+#ifdef ENABLE_ESTOP
+void broadcast_estop()
 {
 	// TODO: Implement
 }
 
-void eStopInterruptHandler ()
+void estop_interrupt_handler()
 {
-	actuator->off();
+	actuator_off();
 	lockdown = true;
 }
 
-void eStopLockdown ()
+void estop_lockdown()
 {
 	detachInterrupt(ESTOP_INTERRUPT_PIN); // disable estop interrupt so repeated estop presses won't cause weird/mistimed LED blinks.
 	Serial.println(F("LOCKED DOWN!!!"));
-	eStopBroadcast();
-	ledOn(RED);
-	blinkLed(GREEN);
+	broadcast_estop();
+	interval = 250; // Make flash faster.
+	led_on(RED);
 	while (true)
 	{
 		// Lockdown loop
-		manageLeds();
+		led_flash(RED);
 	}
-	attachInterrupt(ESTOP_INTERRUPT_PIN, eStopInterruptHandler, LOW);
+	attachInterrupt(ESTOP_INTERRUPT_PIN, estop_interrupt_handler, FALLING);
 }
-/**
- * End: E-Stop
- */
+
+#endif
