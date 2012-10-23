@@ -21,7 +21,7 @@ void clearSerial ()
 /**
  * Blocking operation. Listens for input from the serial port.
  * Exits when a newline is received, the maximum length is reached, or timeout is reached.
- * Setting maxLength to -1 will read for as long as there is space in serial_recieve_data[].
+ * Setting readLength to -1 will read for as long as there is space in serial_recieve_data[].
  * Setting timeout to -1 will allow this method to block for as long as it's needed to reach the max length or a newline.
  * Setting endOnNewLine to true will cause the method to stop reading on a new line
  * Setting clearBufferBefore will clear the serial buffer before waiting for input.
@@ -82,4 +82,90 @@ unsigned long stringToULong (char * uLongString)
 	return output;
 }
 */
+
+boolean parseIpFromSerialRecieveData(byte *result)
+{
+	boolean validInput = true;
+	int octet = 0;
+	byte newIp[] = {0, 0, 0, 0};
+	byte newIpIndex = 0;
+	for (byte i = 0; i <= serial_recieve_index; i++) // Iterating 1 extra time because we won't always have an new line character. So it's used to put the last octet into the array.
+	{
+		if (i == serial_recieve_index)
+		{
+			newIp[newIpIndex++] = octet;
+			break;
+		}
+
+		byte b = serial_recieve_data[i];
+		if (b >= 48 && b <= 57) // 0-9
+		{
+			octet = octet * 10 + (b - 48);
+			if (octet > 255)
+			{
+				validInput = false;
+				break;
+			}
+		}
+		else if ((char)b == '.') // TODO: replace with ASCII code for '.'
+		{
+			newIp[newIpIndex++] = octet;
+			octet = 0;
+		}
+		else if (b == 10 || b == 13)
+		{
+			newIp[newIpIndex++] = octet;
+			break;
+		}
+		else // invalid char
+		{
+			validInput = false;
+			break;
+		}
+	}
+	
+	if (validInput)
+	{
+		if (newIp[0] == 0 || newIp[3] == 0)
+		{
+			validInput = false;
+		}
+		else if (newIp[0] == 0 && newIp[1] == 0 && newIp[2] == 0 && newIp[3] == 0)
+		{
+			validInput = false;
+		}
+	}
+
+	if (validInput)
+	{
+		result[0] = newIp[0];
+		result[1] = newIp[1];
+		result[2] = newIp[2];
+		result[3] = newIp[3];
+	}
+	return validInput;
+}
+
+uint16_t calcCrc16(unsigned char *plainTextArray, int plaintextLength)
+{
+	uint16_t crc = 0;
+	for (int i = 0; i < plaintextLength; i++)
+	{
+		crc = crc ^ plainTextArray[i] << 8;
+		for (int j = 0; j < 8; j++)
+		{
+			
+			if (crc & 0x8000)
+			{
+				crc = crc << 1 ^ 0x1021;
+			}
+			else
+			{
+				crc = crc << 1;
+			}
+		}
+	}
+	return crc;
+}
+
 #endif

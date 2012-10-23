@@ -6,6 +6,7 @@
 
 // Start function declarations
 void printProgrammingModeHelp ();
+void wipeEeprom ();
 // End function declarations
 
 /**
@@ -35,7 +36,7 @@ void programmingMode ()
 	while (programmingMode)
 	{
 		manageLeds();
-		serialListenForInput(1, 50, false, false, true);
+		serialListenForInput(1, 50, false, false, false);
 		if (serial_recieve_index > 0)
 		{
 			flashLed(RED, 200);
@@ -47,6 +48,21 @@ void programmingMode ()
 			case 'x':
 				Serial.println(F("Exiting programming mode"));
 				programmingMode = false;
+				break;
+			case 'd':
+				listen_for_device_name();
+				break;
+			case 'm':
+				listen_for_new_mac_address();
+				break;
+			case 'v':
+				listen_for_auth_server_ip();
+				break;
+			case 'a':
+				listen_for_ip_address();
+				break;
+			case '!':
+				wipeEeprom();
 				break;
 			default:
 				Serial.println(F("Unknown input"));
@@ -79,9 +95,22 @@ void printProgrammingModeHelp ()
 	#ifdef ETHERNET
 	Serial.println(F("m - set/reset MAC address"));
 	Serial.println(F("a - set device IP address (ipv4)"));
+	Serial.println(F("v - set authentication server IP address (ipv4)"));
 	#endif
+	Serial.println(F("! - wipe eeprom"));
 	Serial.println();
 	Serial.println(F("x - exit programming mode"));
+}
+
+#define EEPROM_MAX_ADDRESS 512
+void wipeEeprom()
+{
+	Serial.print(F("Wiping EEPROM wiped..."));
+	for (int i = 0; i < EEPROM_MAX_ADDRESS; i++)
+	{
+		EEPROM.write(i, 0xff);
+	}
+	Serial.println(F(" Done."));
 }
 
 #endif

@@ -27,12 +27,6 @@
     <ClInclude Include="DoorActuator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="IActuator.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="IRFIDReader.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="MockRFIDReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -45,9 +39,6 @@
     <ClInclude Include="ProgrammingMode.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="IAuthenticator.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="MockAuthenticator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -57,29 +48,11 @@
     <ClInclude Include="MemoryFree.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="HsbneAuthenticator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="DoorActuator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="IActuator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="IRFIDReader.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="MockRFIDReader.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="SoftSerialRFID.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="IAuthenticator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="MockAuthenticator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="MemoryFree.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

@@ -45,50 +45,19 @@ char device_name[DEVICE_NAME_MAX_LENGTH + 1]; // +1 for terminating char
 #ifdef ETHERNET
 // network settings:
 byte mac[] = {0, 0 ,0 ,0 ,0 ,0};
+
 byte clientIpBytes[] = {0, 0, 0, 0};
+IPAddress ip(0, 0, 0, 0);
 
-IPAddress ip(192,168,7,7); // client arduino
-
-//byte gateway[] = {  
-// 192, 168, 1, 254 };
-//byte subnet[] = {  
-// 255, 255, 0, 0 };
-
-IPAddress server( 192, 168, 7, 77 ); // destinaton end-point is "auth server" internal IP.
-
-// http recieve buffer
-char client_recieve_data[16];
-int client_recieve_pointer = 0;
-// http timeouts etc
-long unsigned int client_timeout;
-int x_client_finished;
-
-// be a http client, not a server, connect to port 80
+byte authServerIpBytes[] = {0, 0, 0, 0};
+//IPAddress server(0, 0, 0, 0); // destinaton end-point is "auth server" internal IP.
 EthernetClient client;
+
+bool ethernetInit = false;
+
 #else
-	char client_recieve_data[16];
-	int client_recieve_pointer = 0;
-	long unsigned int client_timeout;
 #endif
 
-RFID_READER_CLASS rfidReaderInstance;
-IRFIDReader * rfidReader = &rfidReaderInstance;
-
-AUTHENTICATOR_CLASS authenticatorInstance;
-MockAuthenticator * authenticator = &authenticatorInstance;
-
-ACTUATOR_CLASS actuatorInstance;
-IActuator * actuator = &actuatorInstance;
-
-
-enum AccessType {  INVALID, INNER , OUTER, BACK, OFFICE1, SHED, LIGHTS };
-// eg one door system:
-// enum AccessType {  INVALID, INNER };
-
-//  Which of the above list is this particulare one?  ( this should be different for each door/reader that has different permissions ) 
-//  This tells us which "bit" in the access data we should consider ours! 
-// eg: this means that if the server sends "access:1, then only the "INNER" door is permitted. if the server sends "access:3" then both the INNER and OUTER door are permitted.  If it sends "access:8" then only "SHED" is permittd  ( it's a bit-mask ) 
-#define THISSNARC SHED // in this case, this means any number with bit 5 set to 1 will cause us to trigger the mosfet nad "open door", eg, the number 16
 
 
 void setup()
@@ -99,26 +68,23 @@ void setup()
 	Serial.begin(SNARC_BAUD_RATE);
 
 	Serial.println();
-	load_device_name();
+
+	programmingMode();
 
 	// Display basic config details
+	Serial.println();
+
+	load_device_name();
 	Serial.print(F("Name: "));
 	print_device_name();
 	Serial.println();
 
 	#ifdef ETHERNET
-	load_ip_address();
-	ip = IPAddress(clientIpBytes[0], clientIpBytes[1], clientIpBytes[2], clientIpBytes[3]);
-	Serial.print(F("IP:   "));
-	print_ip_address();
-	Serial.println();
-
-	Serial.print(F("MAC:  "));
-	get_mac_address();
-	print_mac_address();
-	Serial.println();
+	Serial.println(F("Starting ethernet..."));
+	initEthernet();
 	#endif
 
+	// Actuator init
 	pinMode(ACTUATOR_PIN, OUTPUT);
 	digitalWrite(ACTUATOR_PIN, LOW);
 
@@ -128,42 +94,16 @@ void setup()
 
 	Serial.println(F("Started"));
 
-	// Status LEDs
+	// Init status LEDs
 	pinMode(RED_LED_PIN, OUTPUT);
 	digitalWrite(RED_LED_PIN, LOW);
 	pinMode(GREEN_LED_PIN, OUTPUT);
 	digitalWrite(GREEN_LED_PIN, LOW);
 
-	// Ethernet module
-	#ifdef ETHERNET
-	bool useDhcp = true;
-	for (byte i = 0; i < 4; i++)
-	{
-		if (clientIpBytes[i] != 0)
-		{
-			useDhcp = false;
-			break;
-		}
-	}
-	if (useDhcp)
-	{
-		Serial.println("Attempting to aquire IP via DHCP");
-		if (Ethernet.begin(mac) == 0)
-		{
-			Serial.println(F("Failed to configure Ethernet using DHCP"));
-			// TODO: Do somehting aout this error
-		}
-	}
-	else
-	{
-		Ethernet.begin(mac, ip);
-	}
-	#endif
+	delay(3000);
+	authenticator_init();
 
-	programmingMode();
-
-
-	Serial.println(F("Entering Normal Mode! "));
+	Serial.println(F("Entering operation mode! "));
 }
 
 
@@ -180,708 +120,77 @@ void loop ()
 
 	
 	// Check to see if card is available
-	if (rfidReader->available())
+	if (reader_available())
 	{
-		Serial.print("Memory free: ");
-		Serial.println(freeMemory());
-		Serial.print("E-Stop pin: ");
-		Serial.println(digitalRead(ESTOP_PIN) ? "HIGH" : "LOW");
-		Serial.print("Lockdown: ");
-		Serial.println(lockdown ? "true" : "false");
-		unsigned long id = rfidReader->read();
-		if (authenticator->authenticate(id, device_name))
+		#ifdef DEBUG
+				Serial.print("Memory free: ");
+				Serial.println(freeMemory());
+		#endif
+		unsigned long id = reader_read();
+		if (authenticator_authenticate(id, device_name))
 		{
 			// Success
 			flashLed(GREEN, 2000);
 			manageLeds();
 			Serial.println(F("ID has access"));
-			actuator->on();
+			actuator_on();
 		}
 		else
 		{
 			// Fail
 			flashLed(RED, 1000);
+			actuator_off();
 			Serial.println(F("ID does not have access"));
 			// TODO: Implement timeout and turn off if no valid card found
 		}
+		// TODO: wait/sleep for a while before attempting read again?
 	}
 
 }
 
 
-
-
-
-// EVERYTHING BELOW HERE WILL MOST LIKELY DIE IN A FIRE
-int last_code = 0;
-int last_door = 0;
-int last_address = 0;
-int last_found_address = 0;
-
-void clear_serial_buffer ()
+#ifdef ETHERNET
+void initEthernet ()
 {
-	// nothing
-}
-void prompt(){}
-void programming_mode() {
-/*
-	clearSerial();
-	Serial.println(F("Press ENTER within 3 seconds to enter programming mode"));
-	serialListenForInput(1, 3000, false, true, true);
-	int incomingByte = 0;
+	ethernetInit = true; // This is actually quite bad, but currently ethernet init status is set to true as a quick fix. Most failure modes seem to lockup the Arduino anyway.
+	load_ip_address();
+	load_auth_server_ip();
+	get_mac_address();
+	ip = IPAddress(clientIpBytes[0], clientIpBytes[1], clientIpBytes[2], clientIpBytes[3]);
 
-	#ifdef DEBUG
-	if (true) // DEBUG: Always enter programming mode
-	#else
-	if (serial_recieve_index > 0);
-	#endif
+	bool useDhcp = (clientIpBytes[0] == 0 && clientIpBytes[1] == 0 && clientIpBytes[2] == 0 && clientIpBytes[3] == 0) || (clientIpBytes[0] == 0xff && clientIpBytes[1] == 0xff && clientIpBytes[2] == 0xff && clientIpBytes[3] == 0xff);
+	if (useDhcp)
 	{
-	  	clear_serial_buffer();
-	    Serial.println(F("Entered Programming Mode! "));
-	    prompt();
-
-	    while( incomingByte != -1 ) {
-     
-		//led_flash(RED);   // RED FLASH FOR PROGRAMMING MODE
-
-		if ( Serial.available() ) {
-      incomingByte = Serial.read();
-      Serial.println((char)incomingByte);
-
-      switch((char)incomingByte) {
-		case 's':
-			// test send to server
-			Serial.println(F("test send_to_server()"));
-			Serial.println(send_to_server((unsigned long)1234567890, 0));
-	        prompt();
-			break;
-		#ifdef ETHERNET
-		case 'm':
-			// set MAC address
-			listen_for_new_mac_address();
-	        prompt();
-			break;
-		case 'a':
-			// TODO: Implement IP address change
-			listen_for_ip_address();
-			prompt();
-			break;
-		#endif
-		case 'd':
-			listen_for_device_name();
-			prompt();
-			break;
-        // w means "write" initial LIST to EEPROM cache - undocumented command for initial population of eeprom only during transition.
-      case 'w':
-        write_codes_to_eeprom();
-        Serial.print(F("address:"));
-        //Serial.println(last_address);
-        prompt();
-        break;
-        
-      case 'i':
-        init_eeprom(); //wipe all codes
-        Serial.print(F("address:"));
-        //Serial.println(last_address);
-        prompt();
-        break;
-
-        // r mean read current list from EEPROM cache
-      case 'r':
-        read_eeprom_codes();
-        Serial.print(F("address:"));
-        //Serial.println(last_address);
-        prompt();
-        break;
-
-        // x mean exit programming mode, and resume normal behaviour
-      case 'x':
-        incomingByte = -1; // exit this mode
-        break;
-
-        // ignore whitespace
-      case '\r':
-      case '\n':
-      case ' ':
-        break;
-        // n means write new code to EEPROM
-        // ( the next key scanned
-      case 'n':
-        {
-          
-          //read_eeprom_codes(); // nee to do this so as to get last_address pointing ot the end of the EEPROM list.
-          find_last_eeprom_code();  // updates last_address to correct value without any output.
-
-          listen_for_codes();
-          // result is in last_door and last_code
-
-          unlockDoor(); // clunk the door as user feedback
-
-          // see if the key already has access
-          int access =  0;//matchRfid(last_code) & 0xF;
-
-
-	  // IF THIS DOOR/READER is not already in the permitted access list from the EEPROM/SERVER allow it! 
-	  // this converts the bit number, to its binary equivalent, and checks if that bit is set in "access"
-	  // by using a binary "and" command. 
-          if ( access & (  1 << ( THISSNARC - 1 ) ) ==  0 ) {
-
-            // append this ocde to the EEPROM, with current doors permissions:
-           // TEST // write_next_code_to_eeprom(last_code, THISSNARC);
-
-          } else {
-            Serial.println(F("Card already hs access, no change made"));  
-          }
-		  Serial.println(last_code);
-          prompt();
-        }   
-        break;  
-
-      default:   
-        // nothing
-        prompt();
-        break;
-      } //switch/case
-	  clear_serial_buffer();
-    } // if
-    } //while
-}  //END PROGRAMMING MODE
-
-Serial.println(F("Exited Programming Mode! "));
-#ifdef ENABLE_ESTOP
-	if (lockdown)
-	{
-		Serial.println(F("E-STOP triggered while in programming mode."));
-	}
-#endif
-	*/
-}
-
-int send_to_server(unsigned long tag, int door )
-{
-
-	// side-effect: LOG TO USB SERIAL:
-	Serial.print(F("OK: Tag is "));
-	Serial.print(tag);
-	Serial.println(F(" .")); // needed by space server auth script to represent end-of-communication.
-
-	#ifdef ETHERNET
-	// REPORT TO HTTP GET REQUEST:
-	if (client.connect(server,80)) {
-		Serial.println(F("http client connected"));
-		client.print("GET /auth.php?q=");
-		client.print(tag);
-		client.print("&d=");
-		client.println(door);
-		client.println();
-	}
-	else {
-		Serial.println(F("http connection failed"));
-	//  Serial.print(F("GET /auth.php?q="));
-	//  Serial.println(tag);
-	//  Serial.println();
-	}
-	#endif
-
-	// delay some arbitrary amount for the server to respond to the client. say, 1 sec. ?
-	delay(3000);
-
-	// if there are incoming bytes available
-	// from the server, read them and print them:
-	client_timeout=millis();
-	client_recieve_pointer = 0;
-	#ifdef ETHERNET
-		for (;;)
+		Serial.println("Attempting to aquire IP via DHCP...");
+		if (Ethernet.begin(mac) == 0)
 		{
-		  if (client.available())
-		  {
-			//char c = client.read();
-			client_recieve_data[client_recieve_pointer++] = client.read();
-			//Serial.print(c);
-			}
-
-			// if the server's disconnected, stop the client:
-			if (!client.connected())
-			{
-				client.stop();
-				break;
-			}
+			Serial.println(F("Failed to configure Ethernet using DHCP"));
+			ethernetInit = false;
+			// TODO: Do something aout this error
 		}
-	#endif
-	client_recieve_pointer = 0;
-	// if the server's disconnected, stop the client:
-	Serial.print(F("http data:"));
-	// recieved data is now in the string: client_recieve_data
-	Serial.println(client_recieve_data);
-
-	// we expect the permissions string to look like 'access:3' ( for permit ), or 'access:0' (for deny )
-	String Permissions =  String(client_recieve_data);
-  
-	int colonPosition = Permissions.indexOf(':');
-
-	String scs = Permissions.substring(colonPosition + 1);  // as a "String" "object" starting from after the colon to the end! 
-	char cs[10]; 
-	scs.toCharArray(cs,10); // same this as a char array "string" ( lower case) 
-	Serial.print(F("perms from server:"));
-	Serial.println(cs); 
-	int ci = atoi(cs); // as an int!  if this fails, it returns zero, which means no-access, so that's OK. 
-
-	// basic bound check: 
-	if ( ci < 0 || ci > 255 ) { 
-	  return INVALID;   
-	} 
-	return ci;   
-}
-
-// on-demand, connect, GET + data, and disconnect
-// return value is the access permission the server said for that user.
-int send_to_server(char *tag, int door ) {
-
-	// side-effect: LOG TO USB SERIAL:
-	Serial.print(F("OK: Tag is "));
-	Serial.print(tag);
-	Serial.println(F(" .")); // needed by space server auth script to represent end-of-communication.
-
-	#ifdef ETHERNET
-	// REPORT TO HTTP GET REQUEST:
-	if (client.connect(server,80)) {
-		Serial.println(F("http client connected"));
-		client.print("GET /auth.php?q=");
-		client.print(tag);
-		client.print("&d=");
-		client.println(door);
-		client.println();
-	}
-	else {
-		Serial.println(F("http connection failed"));
-	//  Serial.print(F("GET /auth.php?q="));
-	//  Serial.println(tag);
-	//  Serial.println();
-	}
-	#endif
-
-	// delay some arbitrary amount for the server to respond to the client. say, 1 sec. ?
-	delay(3000);
-
-	// if there are incoming bytes available
-	// from the server, read them and print them:
-	client_timeout=millis();
-	client_recieve_pointer = 0;
-	#ifdef ETHERNET
-		for (;;)
-		{
-		  if (client.available())
-		  {
-			//char c = client.read();
-			client_recieve_data[client_recieve_pointer++] = client.read();
-			//Serial.print(c);
-			}
-
-			// if the server's disconnected, stop the client:
-			if (!client.connected())
-			{
-				client.stop();
-				break;
-			}
-		}
-	#endif
-	client_recieve_pointer = 0;
-	// if the server's disconnected, stop the client:
-	Serial.print(F("http data:"));
-	// recieved data is now in the string: client_recieve_data
-	Serial.println(client_recieve_data);
-
-	// we expect the permissions string to look like 'access:3' ( for permit ), or 'access:0' (for deny )
-	String Permissions =  String(client_recieve_data);
-  
-	int colonPosition = Permissions.indexOf(':');
-
-	String scs = Permissions.substring(colonPosition + 1);  // as a "String" "object" starting from after the colon to the end! 
-	char cs[10]; 
-	scs.toCharArray(cs,10); // same this as a char array "string" ( lower case) 
-	Serial.print(F("perms from server:"));
-	Serial.println(cs); 
-	int ci = atoi(cs); // as an int!  if this fails, it returns zero, which means no-access, so that's OK. 
-
-	// basic bound check: 
-	if ( ci < 0 || ci > 255 ) { 
-	  return INVALID;   
-	} 
-	return ci;   
-}
-
-int matchRfid(unsigned long code)
-{
-	int cardAddress = 0;
-	int readAddress = EEPROM_CARDS_START_ADDRESS;
-	int result = 0;
-	bool match = false;
-	while (!match)
-	{
-		if((result = EEPROM.read(readAddress)) == INVALID)
-		{
-			// end of list
-			Serial.println(F("Error: No tag match"));
-			return INVALID;
-		}
-		else
-		{
-			unsigned long eepromCard = 0;
-			byte* p = (byte*)(void*)&eepromCard;
-			for (byte i = 0; i < sizeof(eepromCard); i++)
-			{
-				*p++ = EEPROM.read(readAddress + 1 + i);
-			}
-			if (code == eepromCard)
-			{
-				Serial.print(F("OK: Match found, access "));
-				match = true;
-			}
-			cardAddress++;
-			readAddress = EEPROM_CARDS_START_ADDRESS + cardAddress * 5;
-		}
-	}
-	if (match)
-	{
-		Serial.println(result);
 	}
 	else
 	{
-		Serial.println(F("No match found"));
-	}
-	
-	last_found_address = cardAddress - 1; //remember it incase we need to "UPDATE" this location later....
-
-	return result;
-
-}
-
-// scan the EEPROM looking for a matching RFID code, and return it if it's found
-//also, as a side-affect, we leave 
-
-// pull the codes from EEPROM, emit to Serial0
-void read_eeprom_codes()
-{
-	int readAddress = EEPROM_CARDS_START_ADDRESS; // eeprom address pointer
-	int cardAddress = 0; // This is the actual card "slot"
-	int result = 0;  
-	//char codeout[12]; // holder for code strings as we output them
-	unsigned long codeout = 0;
-	int i = 0;
-	// read EEPROM in 5 byte chunks till we get an INVALID tag to label the end of them.
-	while((result = EEPROM.read(readAddress)) != INVALID)
-	{
-		Serial.print("Card: ");
-		codeout = 0;
-		byte* p = (byte*)(void*)&codeout;
-		for (byte i = 0; i < sizeof(codeout); i++)
-		{
-          *p++ = EEPROM.read(readAddress + 1 + i);
-		}
-		Serial.print(codeout);
-		Serial.print("; Access: ");
-		Serial.println(result);
-		cardAddress++;
-		readAddress = EEPROM_CARDS_START_ADDRESS + cardAddress * 5;
-	}
-	//last_address = cardAddress;
-}
-
-// simpler/quieter variant of the above, used in different circumstance.
-void find_last_eeprom_code() {
-	int address = 0; // eeprom address pointer
-	int result = 0;  
-	//  char codeout[12]; // holder for code strings as we output them
-
-	// read EEPROM in 11 byte chunks till we get an INVALID tag to label the end of them.
-	while((result = EEPROM.read(address*11)) != INVALID)
-	{
-		address++;
+		Ethernet.begin(mac, ip);
 	}
 
-	//last_address = address;
+	Serial.print(F("                      IP: "));
+	print_ip_address();
+	Serial.println();
+
+	Serial.print(F("                     MAC: "));
+	print_mac_address();
+	Serial.println();
+
+	Serial.print(F("Authentication server IP: "));
+	print_auth_server_ip();
+	Serial.println();
 }
 
-void unlockDoor()
-{
-	Serial.println(F("OK: Opening internal door"));
-	actuator_on();
-}
-
-
-void actuator_on()
-{
-	#ifdef ENABLE_ESTOP
-	if (lockdown)
-	{
-		digitalWrite(ACTUATOR_PIN, LOW); // Force low
-		eStopLockdown();
-	}
-	#endif
-	Serial.println(F("OK: Activating actuator."));
-	actuator->on();
-}
-
-void actuator_off()
-{
-	Serial.println(F("OK: Disabling actuator."));
-	actuator->off();
-}
-
-void loop2 () {
-	#ifdef ENABLE_ESTOP
-	if (lockdown)
-	{
-		eStopLockdown();
-	}
-	#endif
-	
-	// reset global variables each time thru
-	//last_code = 0;
-	last_door =  INVALID;
-
-	listen_for_codes();   // blocking, waits for a code/door combo, then writes the result into global last_code and last_door
-
-	//    Serial.println(F("TAG detected!"));
-	//    Serial.println(last_code);  //don't tell user the full tag number
-
-	// NOTE, THIS MATCHES AGAINS THE EEPROM FIRST, NOT THE REMOTE SERVER, AS ITS FASTER ETC.  
-	// IN ORDER TO UPDATE OUR EEPROM AGAINST THE REMOTE SERVER, WE DO THAT *AFTER* allowing someone through ( for speed)
-	// but before denying them fully.
-	int access = matchRfid(last_code) & 0xF; // high bits for future 'master' card flag
-
-	// last_code = the just-scanned RFID card string   
-	// last_door = the integer representing the door this code was just scanned at  (not necessarily permitted )
-
-	int serveraccess = INVALID; // what the remote server is willing to allow the user, we cache this info to EEPROM
-
-	// THISSNARC DOOR CHECK
-	if ( last_door == THISSNARC )
-	{
-		// 
-		if( access & ( 1 << ( THISSNARC - 1 ) ) )  
-		{
-		unlockDoor();
-		serveraccess = send_to_server(last_code,last_door); //log successes/failures/etc, and return the permissions the server has.
-
-		// after the fact, if the server access and the local cached access don't match, update the local one
-		// this can be used for "revoking" keys, by setting they access to INVALID/0
-		  if ( serveraccess != access )
-		  { 
-			writeCode(last_found_address, last_code , serveraccess) ;
-		  }  
-		}
-		else
-		{
-			Serial.println(F("Error: Insufficient rights in EEPROM for THISSNARC door - checking server"));  // must end in fullstop!
-			serveraccess = send_to_server(last_code, last_door); //log successes/failures/etc, and return the permissions the server has.
-			if(serveraccess & ( 1 << ( THISSNARC -1 ) ) ) {
-			  unlockDoor();
-			  //NOTE:   to get here, the key was NOT in EEPROM, but WAS on SERVER, SO ALLOW IT, AND CACHE TO EEPROM TOO!
-			  if ( access != THISSNARC ) {
-				// append this ocde to the EEPROM, with BOTH doors permissions:
-				write_next_code_to_eeprom(last_code,serveraccess);
-			  }  
-			}
-			else {
-			  Serial.println(F("Error: Insufficient rights ( from server) for THISSNARC door "));
-			}
-		}
-	}
-}
-
-
-
-// blocking function that waits for a card to be scanned, and returns the code as a string.
-// WE ALSO supply THE DOOR/READER NUMBER AS THE 12th BYTE in the string ( the 11th byte is the null string terminator )
-// result data is put into global last_code, not returned.
-void listen_for_codes ( void )
-{
-	// before starting to listen, clear all the Serial buffers:
-	/*
-	while (RFIDSerial.available() > 0) {
-		RFIDSerial.read();
-	}
-
-	RFIDSerial.flush();
-	Serial.println(F("listening to READERS, please swipe a card now"));
-
-	int  found = 0 ;
-	while ( found == 0 )
-	{
-		#ifdef ENABLE_ESTOP
-		if (lockdown)
-		{
-			estop_lockdown();
-		}
-		#endif
-
-		int val;
-		last_code = 0;
-		last_door = INVALID;
-
-
-		led_flash(GREEN);   // GREEN FLASH FOR READY MODE
-  
-
-		if (RFIDSerial.available() > 0) // input waiting from internal rfid reader
-		{
-			if ((val = RFIDSerial.read()) == 10)
-			{
-			  int bytesread = 0;
-			  while (bytesread < 10)
-			  { // read 10 digit code
-				if (RFIDSerial.available() > 0)
-				{
-				  val = Serial.read();
-				  bytesread++;
-				  Serial.println(val);
-				  if ((val == 10) || (val == 13))
-				  {
-					break;
-				  }
-				  last_code = last_code * 10 + (val - 48);
-				}
-			  }
-			  if(bytesread == 10)
-			  {
-				Serial.println(F("TAG detected!"));
-				Serial.println(last_code);  //don't tell user the full tag number
-
-				// just in case.....
-				Serial.flush();
-				RFIDSerial.flush();
-
-				// which door was this?
-				last_door = THISSNARC;
-
-				found = 1 ;
-
-			  }
-			  Serial.flush();
-			  bytesread = 0;
-			}
-		}
-	}
-	*/
-	Serial.flush();
-}
-
-void led_flash(int whichled) {
-}
-
-void led_on(int which){
-}
-
-void led_off(){
-}
-
-
-/////////////////////FROM PROGRAMMER CODE!
-// Upload rfid codes into EEPROM
-
-//#include <EEPROM.h>
-
-
-
-// currently MAX of approx 50? 
-// SIZE data; each is 11 bytes, and there are 50, so memory used is 550-600 bytes
-// ... which would be better in the 4K EEPROM, or the 128K PROGMEM , but in 8K SRAM on a Mega it's OK too.
-// IF YOU WANT TO HARDCODE ALL YOUR RFID CARDS IN THE CODE, STORE THEM HERE, and use the "w" command in programming mode!
-// ( not recommended for poduction, there are better and easier ways to do it!  ) 
-//
-/*
-char * codeListBoth[]  =
-{
-"1234567890",
-"\0"  //EOF
-};
-*/
-unsigned long codeListBoth[] = {
-	1,
-	1234567890,
-	4294967295
-};
-
-
-void writeCode (int address, char *code, byte accessLevel)
-{
-	Serial.println("nothing happened. writeCode (int address, char *code, byte accessLevel) is depricated");
-}
 
 /**
- * Saves the 32bit id as a number. Using 5 bytes (1 byte + 4 ulong)
- * address is actually "slot". Actual eeprom address = EEPROM_CARDS_START_ADDRESS + address * 5;
+ * Start: Mac Address
  */
-void writeCode (int address, unsigned long code, byte accessLevel)
-{
-	int writeAddress = EEPROM_CARDS_START_ADDRESS + address * 5;
-	//digitalWrite(LED_PIN1, HIGH);
-	//digitalWrite(LED_PIN2, LOW);
-	//delay(10);
-
-	Serial.print(F("Writing to address "));
-	Serial.println(address);
-
-	Serial.print(F("Access "));
-	Serial.println(accessLevel);
-	EEPROM.write(writeAddress++, accessLevel);
-
-	Serial.print(F("Code "));
-
-	const byte* p = (const byte*)(const void*)&code;
-    unsigned int i;
-    for (i = 0; i < sizeof(code); i++)
-	{
-		EEPROM.write(writeAddress++, *p++);
-	}
-    
-	Serial.println(code);
-	
-	//digitalWrite(LED_PIN1, LOW);
-	//digitalWrite(LED_PIN2, LOW);
-}
-
-void write_next_code_to_eeprom(char *code, byte dooraccess)
-{
-	Serial.println("nothing happened. write_next_code_to_eeprom(unsigned long code, byte dooraccess) is depricated");
-}
-
-// write a single code (  and it's permissions bitmask ) 
-void write_next_code_to_eeprom(unsigned long code, byte dooraccess)
-{
-	// first locate the end of the EEPROM list. Updates last_address variable to correct value without any output.
-	find_last_eeprom_code();  
-	//writeCode( last_address, code, dooraccess ) ;
-	last_address++;
-	//writeCode( last_address, (unsigned long)0, INVALID ) ; // termination code after last code is ESSENTIAL to know where end of list is.
-}
-
-void write_codes_to_eeprom()
-{
-	int address = 0;
-	for (int i = (sizeof(codeListBoth) / sizeof(codeListBoth[0]))- 1; i >= 0; i--)
-	{
-		writeCode(address++, codeListBoth[i], THISSNARC);
-	}
-	writeCode(address, (unsigned long)0, INVALID);
-	Serial.println(F("Finished"));
-
-	//last_address = address;
-}
-
-// wipes eeprom, and initialised it for codes being programmed later
-void init_eeprom()
-{
-	int address = 0;
-	writeCode(address, (unsigned long)0, INVALID);
-	Serial.println(F("Init Finished"));
-	//last_address = address;
-}
-
-
-// MAC address stuff
-#ifdef ETHERNET
 void print_mac_address ()
 {
 	if (mac[0] < 16)
@@ -982,7 +291,7 @@ void listen_for_new_mac_address () // blocking operation
 	byte acc = 0;
 	byte octetB[] = {0, 0};
 	char macOctets[] = {0, 0, 0, 0, 0, 0};
-	clear_serial_buffer();
+	clearSerial();
 	while (true)
 	{
 		if (Serial.available())
@@ -1068,12 +377,19 @@ void listen_for_new_mac_address () // blocking operation
 			}
 		}
 	}
-	clear_serial_buffer();
+	clearSerial();
 }
-// IP address
+/**
+ * End: MAC Address
+ */
+
+/**
+ * Start: IP Address
+ */
 void print_ip_address()
 {
-	// TODO: Test for saved / actual IP
+	Serial.print(Ethernet.localIP());
+	/*
 	Serial.print(clientIpBytes[0], DEC);
 	Serial.print('.');
 	Serial.print(clientIpBytes[1], DEC);
@@ -1081,6 +397,12 @@ void print_ip_address()
 	Serial.print(clientIpBytes[2], DEC);
 	Serial.print('.');
 	Serial.print(clientIpBytes[3], DEC);
+	*/
+	if (clientIpBytes[0] == 0 && clientIpBytes[1] == 0 && clientIpBytes[2] == 0 && clientIpBytes[3] == 0)
+	{
+		Serial.print(" (via DHCP)");
+	}
+
 }
 
 void save_ip_address()
@@ -1088,20 +410,19 @@ void save_ip_address()
 	Serial.println("Saving IP Address...");
 	for (byte i = 0; i < 4; i++)
 	{
-		Serial.println(EEPROM.read(IP_ADDRESS + i));
-		Serial.println(clientIpBytes[i]);
+		//Serial.println(EEPROM.read(IP_ADDRESS + i));
+		//Serial.println(clientIpBytes[i]);
 		EEPROM.write(IP_ADDRESS + i, clientIpBytes[i]);
-		Serial.println(EEPROM.read(IP_ADDRESS + i));
-		Serial.println();
+		//Serial.println(EEPROM.read(IP_ADDRESS + i));
+		//Serial.println();
 	}
 }
 
 void load_ip_address ()
 {
-	Serial.println("Loading IP Address from EEPROM...");
+	Serial.println("Loading IP Address from EEPROM (if available)...");
 	for (byte i = 0; i < 4; i++)
 	{
-		Serial.println(EEPROM.read(IP_ADDRESS + i));
 		clientIpBytes[i] = EEPROM.read(IP_ADDRESS + i);
 	}
 }
@@ -1116,7 +437,7 @@ void listen_for_ip_address()
 	Serial.println(F("Enter new ip address (press enter to use DHCP):"));
 	
 	serial_recieve_index = 0;
-	clear_serial_buffer();
+	clearSerial();
 
 	bool keepReading = true;
 	while (keepReading)
@@ -1138,7 +459,7 @@ void listen_for_ip_address()
 			}
 		}
 	}
-	clear_serial_buffer();
+	clearSerial();
 
 	if (serial_recieve_index == 0)
 	{
@@ -1207,8 +528,14 @@ void listen_for_ip_address()
 	}
 }
 #endif
+/**
+ * End: IP address
+ */
 
-// Device name
+
+/**
+ * Start: Device name
+ */
 void print_device_name()
 {
 	Serial.print(device_name);
@@ -1241,7 +568,7 @@ void listen_for_device_name()
 	Serial.println(F(" characters):"));
 	
 	serial_recieve_index = 0;
-	clear_serial_buffer();
+	clearSerial();
 
 	bool keepReading = true;
 	while (keepReading)
@@ -1263,7 +590,7 @@ void listen_for_device_name()
 			}
 		}
 	}
-	clear_serial_buffer();
+	clearSerial();
 
 	if (serial_recieve_index == 0)
 	{
@@ -1289,8 +616,79 @@ void listen_for_device_name()
 		save_device_name();
 	}
 }
+/**
+ * End: Device name
+ */
 
-// Stuff under here is still good
+/**
+ * Start: Server IP
+ */
+void print_auth_server_ip()
+{
+	for (byte i = 0; i < 4; i++)
+	{
+		Serial.print(authServerIpBytes[i]);
+		if (i != 3)
+		{
+			Serial.print('.');
+		}
+	}
+}
+
+void save_auth_server_ip()
+{
+	Serial.println("Saving Auth server IP Address...");
+	for (byte i = 0; i < 4; i++)
+	{
+		EEPROM.write(AUTH_SERVER_IP_ADDRESS + i, authServerIpBytes[i]);
+	}
+}
+
+void load_auth_server_ip()
+{
+	Serial.println("Loading authentcation server IP Address from EEPROM (if available)...");
+	for (byte i = 0; i < 4; i++)
+	{
+		authServerIpBytes[i] = EEPROM.read(AUTH_SERVER_IP_ADDRESS + i);
+		Serial.print("Auth server IP - ");
+		Serial.println(authServerIpBytes[i], DEC);
+	}
+	//server = new IPAddress(authServerIpBytes[0], authServerIpBytes[1], authServerIpBytes[2], authServerIpBytes[3]);
+}
+
+void listen_for_auth_server_ip()
+{
+	Serial.print(F("Current auth server IP is: "));
+	print_auth_server_ip();
+	Serial.println();
+
+	Serial.println(F("Enter new auth IP:"));
+	serial_recieve_index = 0;
+	clearSerial();
+
+	serialListenForInput(15, -1, true, true, true);
+	byte newIp[] = {0, 0, 0, 0};
+	bool success = parseIpFromSerialRecieveData(authServerIpBytes);
+	if (success)
+	{
+		Serial.println(F("Saving changes..."));
+		save_auth_server_ip();
+		Serial.print(F("Authentication server IP: "));
+		print_auth_server_ip();
+		Serial.println();
+	}
+	else
+	{
+		Serial.println(F("Invalid IP address supplied for authentication server. Changes not saved"));
+	}
+}
+
+/**
+ * End: Server IP
+ */
+
+
+
 /**
  * Start: E-Stop
  */
@@ -1309,7 +707,7 @@ void eStopBroadcast ()
 
 void eStopInterruptHandler ()
 {
-	actuator->off();
+	actuator_off();
 	lockdown = true;
 }
 

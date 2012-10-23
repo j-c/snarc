@@ -71,9 +71,7 @@
     <ClInclude Include=".snarc.vsarduino.h" />
     <ClInclude Include="configuration.h" />
     <ClInclude Include="DoorActuator.h" />
-    <ClInclude Include="IActuator.h" />
-    <ClInclude Include="IAuthenticator.h" />
-    <ClInclude Include="IRFIDReader.h" />
+    <ClInclude Include="HsbneAuthenticator.h" />
     <ClInclude Include="led.h" />
     <ClInclude Include="MemoryFree.h" />
     <ClInclude Include="MockAuthenticator.h" />
@@ -83,14 +81,7 @@
     <ClInclude Include="utils.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="DoorActuator.cpp" />
-    <ClCompile Include="IActuator.cpp" />
-    <ClCompile Include="IAuthenticator.cpp" />
-    <ClCompile Include="IRFIDReader.cpp" />
     <ClCompile Include="MemoryFree.cpp" />
-    <ClCompile Include="MockAuthenticator.cpp" />
-    <ClCompile Include="MockRFIDReader.cpp" />
-    <ClCompile Include="SoftSerialRFID.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
