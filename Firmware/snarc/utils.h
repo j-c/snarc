@@ -6,6 +6,7 @@
 // Temporary storage & output for serial read
 char serial_recieve_data[SERIAL_RECIEVE_BUFFER_LENGTH];
 int serial_recieve_index = 0;
+extern EthernetClient client;
 
 /**
  * Clears anything in the serial recieve buffer
@@ -166,6 +167,42 @@ uint16_t calcCrc16(unsigned char *plainTextArray, int plaintextLength)
 		}
 	}
 	return crc;
+}
+
+uint8_t packetHelper(unsigned char* packet, uint8_t max_size, const char *fmt, ... )
+{
+    uint8_t n;
+    va_list ap;
+    // write the message into a string, place at offset 1 (first byte is the application type)
+    va_start( ap, fmt );
+    n = vsnprintf( (char*) packet, max_size, fmt, ap );
+    va_end( ap );
+    
+    return n;
+}
+
+bool get_server_token(unsigned char* token)
+{
+	uint8_t input[2];
+	int i = 0;
+	input[0] = (uint8_t) 'T';
+	input[1] = 0;
+	client.write(input, 2);
+	delay(1000);
+	while (client.available())
+	{
+		token[i++] = client.read();
+	}
+	
+	uint16_t crc = calcCrc16(token, 3);
+	
+	// If our calculated crc is the same as the one in the packet everything is ok.
+	if (crc == *((uint16_t*)(token + 3)))
+	{
+		Serial.println("Token CRC good");
+		return true;
+	}
+	return false;
 }
 
 #endif

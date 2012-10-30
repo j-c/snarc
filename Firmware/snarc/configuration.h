@@ -3,7 +3,7 @@
 
 // un-comment if debugging
 #define DEBUG
-
+#define SALT "sderf"
 #define SNARC_BAUD_RATE 115200
 
 #define ACTUATOR_PIN 14 // mosfet pin

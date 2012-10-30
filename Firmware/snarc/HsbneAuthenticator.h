@@ -44,49 +44,29 @@ void authenticator_init()
 	}
 }
 
-bool authenticator_authenticate(unsigned long id, char * deviceName)
+bool authenticator_authenticate(uint32_t card_id, char* deviceName)
 {
-	unsigned char token[255];
-	uint8_t input[255];
-	int i = 0;
-	input[0] = (uint8_t) 'T';
-	input[1] = 0;
-	client.write(input, 2);
-	//client.write('T');
-	//client.write((byte)0);
-	delay(1000);
-	while (client.available())
+	unsigned char token[5];
+	unsigned char input[strlen(SALT)+2+8+strlen(deviceName)]; // Salt + Token + Msg (8+deviceName)
+	unsigned char responce[255];
+        va_list ap;
+	uint8_t i = 0;
+	
+	while(!get_server_token(token))
 	{
-		unsigned char c = client.read();
-		Serial.print(c, HEX);
-		Serial.print(' ');
-		token[i++] = c;
+            packetHelper(input, strlen(SALT)+2+8+strlen(deviceName), "%c%c@%c%c%c", SALT, *((uint16_t*)(token+1)), strlen(deviceName), deviceName, card_id);
+            *((uint16_t*)(input+10+strlen(deviceName))) = calcCrc16(input, input[4]+10);
+            
+            client.write(input+strlen(SALT)+2, 8+strlen(deviceName));
+            delay(1000);
+            while (client.available())
+            {
+                responce[i++] = client.read();
+            }
+            // Need to check the responce..
 	}
 	
-	Serial.println();
-
-	uint16_t crc = calcCrc16(token, 3);
-	// Here be dragons!
-	if (crc == *((uint16_t*)(token + 3)))
-	{
-		Serial.println("CRC good");
-	}
-	else
-	{
-		Serial.println("CRC ARAFSADSAGDAGSETHDRGFTRHJ");
-/*		Serial.print(crc & 0xFF, HEX);
-		Serial.print(' ');
-		Serial.println(crc >> 8, HEX);
-		Serial.print(token[3], HEX);
-		Serial.print(' ');
-		Serial.println(token[4], HEX);
-		Serial.print("crc: ");
-		Serial.println(crc, HEX);
-		Serial.print("tok: ");
-		Serial.println(*((uint16_t*)(token + 3)), HEX);
-		*/
-	}
-	return id == 0xFFFFFFFF;
+	return card_id == 0xFFFF;
 }
 
 #endif
