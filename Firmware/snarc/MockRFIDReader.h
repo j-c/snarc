@@ -1,5 +1,5 @@
-#ifndef MOCKRFIDREADER_H_
-#define MOCKRFIDREADER_H_
+#ifndef MOCKRFIDREADER_H
+#define MOCKRFIDREADER_H
 
 /**
  * Authenticatoion providers should have these methods:
@@ -12,33 +12,8 @@
 
 #include <Arduino.h>
 
-unsigned long reader_nextAvailable;
-bool reader_nextIdZero; // If next request for an ID should return a 0 or 0xFFFFFFFF;
+void reader_init();
+bool reader_available();
+unsigned long reader_read();
 
-void reader_init()
-{
-	// Nothing
-	reader_nextAvailable = millis();
-	reader_nextIdZero = false;
-}
-
-bool reader_available()
-{
-	if (millis() >= reader_nextAvailable)
-	{
-		reader_nextAvailable = millis() + 5000; // Next card will be available in 5 seconds
-		return true;
-	}
-	else
-	{
-		return false;
-	}
-}
-
-unsigned long reader_read()
-{
-	reader_nextIdZero = !reader_nextIdZero;
-	return reader_nextIdZero ? 4294967295 : 0;
-}
-
-#endif
+#endif // MOCKRFIDREADER_H

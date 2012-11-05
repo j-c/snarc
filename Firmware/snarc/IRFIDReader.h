@@ -6,14 +6,11 @@
 class IRFIDReader
 {
 public:
-	virtual bool available() = 0;
-	virtual unsigned long read() = 0;
-	void setHardwareSerial (HardwareSerial *serialInstance)
-	{
-		hardwareSerial = serialInstance;
-	}
+        virtual bool available() = 0;
+        virtual unsigned long read() = 0;
+	void setHardwareSerial (HardwareSerial *serialInstance);
 private:
-	HardwareSerial *hardwareSerial;
+        HardwareSerial *hardwareSerial;
 };
 
-#endif
+#endif // IRIFDREADER_H

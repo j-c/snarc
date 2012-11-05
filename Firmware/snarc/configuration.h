@@ -2,7 +2,7 @@
 #define CONFIGURATION_H
 
 // un-comment if debugging
-#define DEBUG
+//#define DEBUG
 #define SALT "sderf"
 #define SNARC_BAUD_RATE 115200
 
@@ -37,7 +37,7 @@
 #define EEPROM_CARDS_START_ADDRESS 28 // Which address to start saving cards to. Should be the last address
 
 
-
+#include "led.h"
 // 0 = mock reader, 1 = soft serial
 #define RFID_READER_TYPE 0
 

@@ -1,5 +1,3 @@
-#ifndef DOORACTUATOR_H
-#define DOORACTUATOR_H
 /**
  * Actuators should have these methods:
  * + void actuator_init() - Run once at the start to set any required variables/pins/etc.
@@ -8,13 +6,28 @@
  *
  * The door actuator will hold a pin high for 2 seconds to unlock a door strike. Off does nothing.
  */
-#include "IActuator.h"
-#include "Arduino.h"
-#include "configuration.h"
-#include "led.h"
+#include "DoorActuator.h"
 
-void actuator_init ();
-void actuator_on();
-void actuator_off();
+unsigned long actuator_momentaryTime = 2000; // TODO: Make configurable
 
-#endif // DOORACTUATOR_H
+void actuator_init ()
+{
+	pinMode(ACTUATOR_PIN, OUTPUT);
+}
+
+void actuator_on()
+{
+	digitalWrite(ACTUATOR_PIN, HIGH);
+	unsigned long delayEnd = millis() + actuator_momentaryTime;
+	while (actuator_momentaryTime > millis())
+	{
+		manageLeds();
+	}
+	digitalWrite(ACTUATOR_PIN, LOW);
+}
+
+
+void actuator_off()
+{
+	// Nothing
+}

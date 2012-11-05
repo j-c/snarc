@@ -1,5 +1,4 @@
-#ifndef MOCK_AUTHENTICATOR_H
-#define MOCK_AUTHENTICATOR_H
+#include "MockAuthenticator.h"
 
 /**
  * Authenticatoion providers should have these methods:
@@ -9,7 +8,12 @@
  * This is a mock authenticator for testing purposes. It will accept 0xFFFFFFFF and reject everything else.
  */
 
-void mock_authenticator_init();
-bool mock_authenticator_authenticate(unsigned long id, char * deviceName);
+void mock_authenticator_init()
+{
+	// Nothing
+}
 
-#endif // MOCK_AUTHENTICATOR_H
+bool mock_authenticator_authenticate(unsigned long id, char * deviceName)
+{
+	return id == 0xFFFFFFFF;
+}
